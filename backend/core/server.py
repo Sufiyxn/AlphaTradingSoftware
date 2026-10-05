@@ -7,6 +7,8 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import load_settings
 from .runtime import ApplicationRuntime
+from backend.backtesting import BacktestEngine
+from backend.market_data.session import market_session
 
 
 def create_server(runtime: ApplicationRuntime, host: str, port: int) -> ThreadingHTTPServer:
@@ -49,16 +51,48 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 elif path == "/api/quotes":
                     result = {"quotes": runtime.market_data.get_latest(runtime.orchestrator.config.universe.symbols)}
                 elif path == "/api/positions":
-                    result = {"positions": runtime.portfolio.positions, "portfolio": runtime.portfolio.snapshot()}
+                    open_by_symbol = {trade.symbol: trade for trade in runtime.paper.trades}
+                    positions = []
+                    for position in runtime.portfolio.positions:
+                        trade = open_by_symbol.get(position.symbol)
+                        risk = abs(trade.entry_price - trade.stop_price) if trade else None
+                        sign = 1 if position.direction.value == "LONG" else -1
+                        positions.append({"symbol": position.symbol, "direction": position.direction,
+                                          "quantity": position.quantity,
+                                          "entry_price": position.average_entry_price,
+                                          "current_price": position.market_price,
+                                          "stop_price": trade.stop_price if trade else None,
+                                          "target_price": trade.target_price if trade else None,
+                                          "unrealized_pnl": position.unrealized_pnl,
+                                          "r_multiple": ((position.market_price - position.average_entry_price) * sign / risk) if risk else None,
+                                          "status": "OPEN"})
+                    result = {"positions": positions, "portfolio": runtime.portfolio.snapshot()}
+                elif path == "/api/portfolio":
+                    result = runtime.portfolio.snapshot()
                 elif path == "/api/trades":
-                    result = {"trades": runtime.repository.rows("trades", symbol=_one(query, "symbol"))}
+                    result = {"trades": runtime.repository.rows("trades", symbol=_one(query, "symbol"))[:100]}
+                elif path == "/api/activity":
+                    limit = int(_one(query, "limit") or 50)
+                    if not 1 <= limit <= 200:
+                        raise ValueError("limit must be between 1 and 200")
+                    symbol = _one(query, "symbol")
+                    events = [{"record_type": "system", **row} for row in runtime.repository.events(symbol=symbol, limit=limit)]
+                    errors = [{"record_type": "error", **row} for row in runtime.repository.errors(symbol=symbol, limit=limit)]
+                    orders = [{"record_type": "order", **row} for row in runtime.repository.rows("orders", symbol=symbol)[:limit]]
+                    result = {"events": sorted(events + errors + orders,
+                                               key=lambda item: str(item.get("timestamp", "")), reverse=True)[:limit]}
                 elif path == "/api/performance":
-                    result = runtime.performance.calculate(as_of=date.today(), portfolio=runtime.portfolio.snapshot())
+                    result = runtime.performance.calculate(
+                        as_of=market_session(runtime.clock()).trading_date, portfolio=runtime.portfolio.snapshot())
                 elif path == "/api/reports":
-                    report_day = date.fromisoformat(_one(query, "date") or date.today().isoformat())
-                    saved = runtime.repository.get_daily_performance(report_day)
-                    result = saved if saved is not None else runtime.daily_reports.generate_on_demand(
-                        report_day, runtime.portfolio.snapshot(), system_health="OK")
+                    report_day = _date_param(query, "date")
+                    if report_day is None:
+                        result = {"reports": runtime.repository.list_daily_performance(
+                            start=_date_param(query, "start"), end=_date_param(query, "end"))}
+                    else:
+                        saved = runtime.repository.get_daily_performance(report_day)
+                        result = saved if saved is not None else runtime.daily_reports.generate_on_demand(
+                            report_day, runtime.portfolio.snapshot(), system_health="OK")
                 elif path == "/api/logs":
                     start = _date_param(query, "start")
                     end = _date_param(query, "end")
@@ -82,6 +116,16 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     result = {"adapter": runtime.execution.identify(), "paper_trading": caps.paper_trading,
                               "live_trading": False, "authenticated": runtime.execution.is_authenticated(),
                               "capabilities": caps}
+                elif path == "/api/connections":
+                    result = runtime.connections.status()
+                elif path in ("/api/readiness", "/api/connection/readiness"):
+                    result = runtime.connections.readiness()
+                elif path == "/api/backtest":
+                    start = datetime(2024, 1, 2, 0, tzinfo=runtime.clock().tzinfo)
+                    end = datetime(2024, 1, 3, 0, tzinfo=runtime.clock().tzinfo)
+                    histories = {symbol: runtime.market_data.get_historical(symbol, start, end)
+                                 for symbol in runtime.orchestrator.config.universe.symbols}
+                    result = BacktestEngine().run(histories)
                 else:
                     return self._send(404, {"error": "not found"})
                 self._send(200, result)
@@ -95,6 +139,12 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
             token = self.headers.get("X-Owner-Token")
             try:
                 body = self._body()
+                if urlparse(self.path).path == "/api/connections/test":
+                    controls.authorize_owner(token)
+                    section = str(body.get("section", ""))
+                    result = runtime.connections.test(section)
+                    controls.audit_connection_test(token, section, result)
+                    return self._send(200 if result["success"] else 409, result)
                 actions = {
                     "/api/control/start": lambda: controls.start(token),
                     "/api/control/stop": lambda: controls.stop(token),
@@ -103,6 +153,7 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     "/api/control/emergency-stop": lambda: controls.emergency_stop(token, str(body.get("reason", "owner emergency stop"))),
                     "/api/control/reset-emergency-stop": lambda: controls.reset_emergency_stop(token, str(body.get("reason", ""))),
                     "/api/control/terminate": lambda: controls.terminate(token),
+                    "/api/control/safe-termination": lambda: controls.terminate(token),
                     "/api/control/configuration": lambda: controls.update_runtime_config(token, str(body.get("key", "")), body.get("value")),
                 }
                 action = actions.get(urlparse(self.path).path)

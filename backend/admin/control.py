@@ -43,6 +43,15 @@ class OwnerControlPlane:
         return {"actor": actor, "events": self.repository.events(limit=limit),
                 "errors": self.repository.errors(limit=limit)}
 
+    def audit_connection_test(self, credential: str | None, section: str, result: dict) -> None:
+        actor = self._authorize(credential)
+        safe_result = {key: value for key, value in result.items()
+                       if key in ("status", "success", "tested_at", "last_successful_at", "error", "message")}
+        self._audit("OWNER_TESTED_CONNECTION", actor, {"section": section, "result": safe_result})
+
+    def authorize_owner(self, credential: str | None) -> str:
+        return self._authorize(credential)
+
     def pause(self, credential: str | None) -> None:
         actor = self._authorize(credential)
         self.orchestrator.pause()

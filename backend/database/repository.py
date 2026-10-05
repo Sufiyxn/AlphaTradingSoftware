@@ -130,6 +130,21 @@ class SQLiteJournalRepository:
         rows = self._query("SELECT context_json FROM daily_performance WHERE report_date=?", (day.isoformat(),), ("context_json",))
         return rows[0]["context_json"] if rows else None
 
+    def list_daily_performance(self, *, start: date | None = None,
+                               end: date | None = None) -> tuple[dict[str, Any], ...]:
+        where: list[str] = []
+        values: list[Any] = []
+        if start:
+            where.append("report_date >= ?")
+            values.append(start.isoformat())
+        if end:
+            where.append("report_date <= ?")
+            values.append(end.isoformat())
+        query = "SELECT report_date,context_json FROM daily_performance"
+        if where:
+            query += " WHERE " + " AND ".join(where)
+        return self._query(query + " ORDER BY report_date DESC", values, ("context_json",))
+
     def _filtered_rows(self, table: str, timestamp_col: str, start: date | None, end: date | None,
                        symbol: str | None, limit: int | None, json_columns: tuple[str, ...],
                        *, symbol_column: str = "symbol") -> tuple[dict[str, Any], ...]:

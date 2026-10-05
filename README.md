@@ -39,9 +39,11 @@ The displayed US session uses standard weekday, daylight-saving, holiday, and ea
 
 ## Data and trading limits
 
-The mock provider contains a tiny fixed 2024 sample, so the displayed quotes are stale demonstration data. The scanner reports its temporary test analysis separately from the strategy engine. Insufficient history means no strategy setup; do not treat the sample as current market information. No public-market provider or TradingView alert endpoint is configured in this version. The execution router only registers the mock adapter, and status explicitly reports live trading unavailable.
+The runtime uses a deterministic, synthetic 2024 multi-symbol history so the scanner, baseline strategy, risk checks, paper fills, backtests, and journal can be exercised locally. These are stale demonstration prices, not current quotes or evidence of strategy performance. No public-market provider or TradingView webhook endpoint is installed. The execution router only registers the mock adapter.
 
-The strategy/risk/backtest modules are available for local development. Risk remains between strategy evaluation and paper execution, including 2:1 minimum reward/risk, per-trade and daily loss limits, exposure/position limits, and the kill switch. The 51% realized win-rate value is an evaluation target, not a claim or guarantee.
+The **Connections & Live Setup** section reports configuration presence for market data, platform, AI, notifications, and TradingView. Set the documented environment variables in `.env` and restart to update them. Secret values are never returned by the API or stored in SQLite. Connection tests only exercise local mock services; configured external providers are reported unsupported until a documented adapter is added. Live mode is permanently locked in this version; entering credentials cannot enable live execution.
+
+The strategy/risk/backtest modules are available for local development. Risk remains between strategy evaluation and paper execution, including strict entry below $100, 2:1 minimum reward/risk, per-trade and daily loss limits, exposure/position limits, and the kill switch. Performance qualification requires a sufficient evaluation sample and at least 51% measured win rate. Mock results are not a profitability claim or guarantee.
 
 ## Verification
 
