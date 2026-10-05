@@ -1,0 +1,23 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+:root { font-family: 'DM Sans', sans-serif; color: #e7edf7; background: #0b111b; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(ellipse at 50% 35%, #172235 0%, #0b111b 68%); }
+.shell { min-height: 100vh; display: flex; flex-direction: column; padding: 0 7vw; }
+.topbar { height: 76px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #202b3b; color: #cbd5e3; font-size: 12px; letter-spacing: .14em; }
+.topbar b { color: #fff; font-weight: 600; }
+.brand-mark { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid #46d6a0; border-radius: 7px; color: #46d6a0; font-weight: 700; font-size: 15px; }
+.mode { margin-left: 5px; padding: 5px 8px; border-radius: 4px; background: #192537; color: #8494aa; font: 9px 'DM Mono', monospace; letter-spacing: .1em; }
+.welcome { width: min(580px, 100%); margin: auto; padding: 72px 0; }
+.eyebrow { color: #49d5a0; font: 10px 'DM Mono', monospace; letter-spacing: .2em; }
+h1 { margin: 16px 0 10px; font-size: clamp(30px, 5vw, 42px); letter-spacing: -.04em; }
+.subtext { color: #8998ad; font-size: 14px; line-height: 1.6; }
+.status-card { display: flex; align-items: center; gap: 14px; margin-top: 38px; padding: 19px; border: 1px solid #253247; border-radius: 9px; background: #111a28cc; }
+.indicator { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #d5a548; box-shadow: 0 0 12px #d5a54866; }
+.indicator.online { background: #48d59f; box-shadow: 0 0 12px #48d59f77; }
+.status-card strong { font-size: 13px; font-weight: 600; }
+.status-card p { margin: 5px 0 0; color: #8291a6; font: 11px 'DM Mono', monospace; }
+.badge { margin-left: auto; color: #d5a548; font: 9px 'DM Mono', monospace; letter-spacing: .1em; }
+.badge.good { color: #48d59f; }.badge.bad { color: #ef7979; }
+footer { padding: 22px 0; border-top: 1px solid #202b3b; color: #59677b; font: 9px 'DM Mono', monospace; letter-spacing: .12em; }
+footer span { padding: 0 7px; color: #344256; }
