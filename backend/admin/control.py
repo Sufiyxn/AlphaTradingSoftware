@@ -48,6 +48,21 @@ class OwnerControlPlane:
         self.orchestrator.pause()
         self._audit("OWNER_PAUSED_BOT", actor)
 
+    def start(self, credential: str | None) -> None:
+        actor = self._authorize(credential)
+        self.orchestrator.resume()
+        with self._lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._worker = threading.Thread(target=self.orchestrator.start,
+                                                name="alpha-orchestrator", daemon=True)
+                self._worker.start()
+        self._audit("OWNER_STARTED_BOT", actor)
+
+    def stop(self, credential: str | None) -> None:
+        actor = self._authorize(credential)
+        self.orchestrator.stop()
+        self._audit("OWNER_STOPPED_BOT", actor)
+
     def resume(self, credential: str | None) -> None:
         actor = self._authorize(credential)
         self.orchestrator.resume()
@@ -80,6 +95,11 @@ class OwnerControlPlane:
         actor = self._authorize(credential)
         self.orchestrator.emergency_stop(triggered_by=actor, reason=reason)
         self._audit("OWNER_EMERGENCY_STOP", actor, {"reason": reason})
+
+    def reset_emergency_stop(self, credential: str | None, reason: str) -> None:
+        actor = self._authorize(credential)
+        self.orchestrator.reset_emergency_stop(triggered_by=actor, reason=reason)
+        self._audit("OWNER_RESET_EMERGENCY_STOP", actor, {"reason": reason})
 
     def terminate(self, credential: str | None) -> None:
         actor = self._authorize(credential)

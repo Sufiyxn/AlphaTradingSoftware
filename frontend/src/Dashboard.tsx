@@ -1,0 +1,56 @@
+import { useCallback, useEffect, useState } from 'react'
+
+type Position = { symbol: string; direction: string; quantity: number; average_entry_price: number; market_price: number; unrealized_pnl: number }
+type Opportunity = { symbol: string; direction: string; score: number; entry_price: number | null; reward_risk_ratio: number | null; valid: boolean }
+type Trade = { trade_id: string; symbol: string; direction: string; entry_price: number; exit_price: number | null; quantity: number; pnl: number | null; strategy: string; entry_timestamp: string; exit_timestamp: string | null }
+type Status = { mode: string; market_data_provider: string; execution_adapter: string; owner_controls_enabled: boolean; risk_kill_switch: boolean; orchestrator: { status: string; current_cycle: number; last_scan_timestamp: string | null; candidates_found: number; candidates_rejected: number; trades_approved: number; trades_rejected_by_risk: number }; portfolio: { cash: number; equity: number; exposure: number; realized_pnl: number; unrealized_pnl: number; positions: Position[] } }
+type Performance = { total_trades: number; win_rate: number; realized_pnl: number; unrealized_pnl: number; maximum_drawdown: number; qualification_status: string }
+type Log = { record_type: string; timestamp?: string; entry_timestamp?: string; symbol?: string; event_type?: string; message?: string; pnl?: number | null }
+type Data = { status: Status; opportunities: Opportunity[]; trades: Trade[]; performance: Performance; logs: Log[] }
+const usd = (n?: number | null) => n == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
+const time = (s?: string | null) => s ? new Date(s).toLocaleString() : '—'
+
+export default function Dashboard() {
+  const [data, setData] = useState<Data | null>(null)
+  const [error, setError] = useState('')
+  const [token, setToken] = useState('')
+  const [notice, setNotice] = useState('')
+  const [busy, setBusy] = useState(false)
+  const refresh = useCallback(async () => {
+    try {
+      const paths = ['/api/status', '/api/opportunities', '/api/trades', '/api/performance', '/api/logs?kind=all']
+      const responses = await Promise.all(paths.map((path) => fetch(path)))
+      if (responses.some((response) => !response.ok)) throw new Error('Dashboard data is unavailable')
+      const [status, opportunities, trades, performance, logs] = await Promise.all(responses.map((r) => r.json()))
+      setData({ status, opportunities: opportunities.opportunities, trades: trades.trades, performance, logs }); setError('')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'API unavailable') }
+  }, [])
+  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 10000); return () => window.clearInterval(timer) }, [refresh])
+  const control = async (action: string, body: object = {}) => {
+    if (!token) { setNotice('Enter the owner control token configured in backend .env.'); return }
+    setBusy(true); setNotice('')
+    try {
+      const response = await fetch(`/api/control/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Owner-Token': token }, body: JSON.stringify(body) })
+      const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Control request failed')
+      setNotice(`${action.replaceAll('-', ' ')} accepted`); await refresh()
+    } catch (cause) { setNotice(cause instanceof Error ? cause.message : 'Control request failed') }
+    finally { setBusy(false) }
+  }
+  const status = data?.status, account = status?.portfolio, running = status?.orchestrator.status === 'RUNNING'
+  const entries: Log[] = [...(data?.trades ?? []).map((trade): Log => ({ record_type: 'trade', timestamp: trade.exit_timestamp || trade.entry_timestamp, symbol: trade.symbol, message: `${trade.direction} ${trade.quantity} · ${trade.strategy}`, pnl: trade.pnl })), ...(data?.logs ?? [])].slice(0, 10)
+  return <main className="app-shell">
+    <header className="topbar"><a className="brand" href="#top"><span className="brand-icon">A</span><span>ALPHA <b>TRADING</b></span></a><div className="header-state"><i className={status ? 'online' : 'offline'} />{error || (status ? 'SYSTEM CONNECTED' : 'CONNECTING')}</div><div className="mode-pill"><span /> PAPER MODE</div></header>
+    <section className="page-heading" id="top"><div><p className="eyebrow">LOCAL CONTROL CENTER <span>/</span> {new Date().toLocaleDateString()}</p><h1>Trading dashboard</h1><p className="muted">Read-only market view with authenticated paper controls.</p></div><button className="button ghost" onClick={() => void refresh()}>↻ <span>Refresh</span></button></section>
+    {error && <div className="alert danger">Backend unavailable: {error}. Start it with <code>python -m backend</code>.</div>}{notice && <div className="alert">{notice}</div>}
+    <section className="metric-grid"><Metric label="Portfolio equity" value={usd(account?.equity)} note="Paper account" /><Metric label="Realized P&amp;L" value={usd(account?.realized_pnl)} note={`${data?.performance.total_trades ?? 0} closed trades`} tone={(account?.realized_pnl || 0) >= 0 ? 'positive' : 'negative'} /><Metric label="Open exposure" value={usd(account?.exposure)} note={`${account?.positions.length ?? 0} active positions`} /><Metric label="Win rate" value={`${(data?.performance.win_rate ?? 0).toFixed(1)}%`} note={data?.performance.qualification_status ?? 'Not qualified'} /></section>
+    <section className="layout-grid"><div className="panel wide-panel"><div className="panel-head"><div><p className="eyebrow">MARKET SCANNER</p><h2>Opportunities</h2></div><span className="count-badge">{data?.opportunities.length ?? 0}</span></div><div className="table-wrap"><table><thead><tr><th>Symbol</th><th>Direction</th><th>Score</th><th>Entry</th><th>Reward / risk</th><th>Status</th></tr></thead><tbody>{data?.opportunities.map((o) => <tr key={o.symbol}><td className="symbol">{o.symbol}</td><td><span className={`direction ${o.direction.toLowerCase()}`}>{o.direction}</span></td><td>{o.score.toFixed(3)}</td><td>{usd(o.entry_price)}</td><td>{o.reward_risk_ratio?.toFixed(2) ?? '—'}</td><td><span className={`status-tag ${o.valid ? 'good' : 'quiet'}`}>{o.valid ? 'VALID' : 'FILTERED'}</span></td></tr>)}{!data?.opportunities.length && <Empty span={6} text="No market candidates in the current local data window." />}</tbody></table></div><p className="panel-foot">Data source: {status?.market_data_provider ?? '—'} · deterministic local sample</p></div>
+      <div className="panel controls-panel"><div className="panel-head"><div><p className="eyebrow">OWNER ACTIONS</p><h2>Bot controls</h2></div><span className={`status-tag ${running ? 'good' : 'quiet'}`}>{status?.orchestrator.status ?? 'OFFLINE'}</span></div><label className="field-label" htmlFor="owner-token">Owner token</label><input id="owner-token" type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Set OWNER_CONTROL_TOKEN" autoComplete="off" /><div className="button-grid"><button disabled={busy || running} onClick={() => void control('start')}>Start</button><button disabled={busy || !running} onClick={() => void control('pause')}>Pause</button><button disabled={busy} onClick={() => void control('stop')}>Stop</button><button className="danger-button" disabled={busy} onClick={() => { const reason = window.prompt('Reason for emergency stop'); if (reason) void control('emergency-stop', { reason }) }}>Emergency stop</button></div>{status?.risk_kill_switch && <button className="reset-button" disabled={busy} onClick={() => { const reason = window.prompt('Enter the reviewed reset reason'); if (reason) void control('reset-emergency-stop', { reason }) }}>Reset emergency stop</button>}<div className="control-foot"><span>Cycle <b>{status?.orchestrator.current_cycle ?? 0}</b></span><span>Risk rejections <b>{status?.orchestrator.trades_rejected_by_risk ?? 0}</b></span></div><div className="safety-note">Live trading is unavailable. All order paths use the local mock adapter.</div></div></section>
+    <section className="layout-grid lower-grid"><div className="panel wide-panel"><div className="panel-head"><div><p className="eyebrow">PAPER PORTFOLIO</p><h2>Open positions</h2></div><span className="count-badge">{account?.positions.length ?? 0}</span></div><div className="table-wrap"><table><thead><tr><th>Symbol</th><th>Direction</th><th>Quantity</th><th>Entry</th><th>Mark</th><th>Unrealized</th></tr></thead><tbody>{account?.positions.map((p) => <tr key={p.symbol}><td className="symbol">{p.symbol}</td><td>{p.direction}</td><td>{p.quantity}</td><td>{usd(p.average_entry_price)}</td><td>{usd(p.market_price)}</td><td className={(p.unrealized_pnl || 0) >= 0 ? 'positive' : 'negative'}>{usd(p.unrealized_pnl)}</td></tr>)}{!account?.positions.length && <Empty span={6} text="There are no open paper positions." />}</tbody></table></div></div>
+      <div className="panel health-panel"><div className="panel-head"><div><p className="eyebrow">SYSTEM HEALTH</p><h2>Runtime</h2></div><span className="pulse-dot" /></div><Health name="Market data" value={status?.market_data_provider ?? '—'} /><Health name="Execution adapter" value={status?.execution_adapter ?? '—'} /><Health name="Mode" value="PAPER ONLY" /><Health name="Kill switch" value={status?.risk_kill_switch ? 'ENGAGED' : 'READY'} danger={status?.risk_kill_switch} /><Health name="Last cycle" value={time(status?.orchestrator.last_scan_timestamp)} /></div></section>
+    <section className="panel recent-panel"><div className="panel-head"><div><p className="eyebrow">PERSISTENT JOURNAL</p><h2>Recent trades and events</h2></div><a className="text-link" href="/api/logs?kind=all&amp;format=json" target="_blank" rel="noreferrer">Export JSON ↗</a></div><div className="table-wrap"><table><thead><tr><th>Type</th><th>Time</th><th>Symbol</th><th>Details</th><th>Result</th></tr></thead><tbody>{entries.map((row, i) => <tr key={`${row.record_type}-${i}`}><td><span className="status-tag quiet">{row.record_type.toUpperCase()}</span></td><td>{time(row.timestamp || row.entry_timestamp)}</td><td className="symbol">{row.symbol ?? '—'}</td><td className="event-message">{row.message ?? row.event_type ?? 'Journal event'}</td><td className={(row.pnl || 0) >= 0 ? 'positive' : 'negative'}>{row.pnl == null ? '—' : usd(row.pnl)}</td></tr>)}{!entries.length && <Empty span={5} text="Journal entries appear here when the paper engine runs." />}</tbody></table></div></section>
+    <footer className="footer"><span>ALPHA TRADING PLATFORM <i>•</i> V1 LOCAL</span><span>Read-only data · Paper execution · No broker credentials</span></footer>
+  </main>
+}
+function Metric({ label, value, note, tone = '' }: { label: string; value: string; note: string; tone?: string }) { return <article className="metric-card"><p>{label}</p><strong className={tone}>{value}</strong><small>{note}</small></article> }
+function Empty({ span, text }: { span: number; text: string }) { return <tr><td colSpan={span} className="empty-state">{text}</td></tr> }
+function Health({ name, value, danger = false }: { name: string; value: string; danger?: boolean }) { return <div className="health-row"><span>{name}</span><b className={danger ? 'negative' : ''}>{value}</b></div> }

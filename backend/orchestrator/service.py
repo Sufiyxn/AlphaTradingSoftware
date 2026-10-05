@@ -120,6 +120,19 @@ class TradingOrchestrator:
         self._journal_event("EMERGENCY_STOP", reason,
                             {"triggered_by": triggered_by, "reason": reason})
 
+    def reset_emergency_stop(self, *, triggered_by: str, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("a reset reason is required")
+        with self._lock:
+            if not self._emergency_stopped:
+                raise RuntimeError("emergency stop is not active")
+            self._emergency_stopped = False
+            self._status = OrchestratorStatus.STOPPED
+            self._stop_event.set()
+        self.risk_engine.set_kill_switch(False)
+        self._journal_event("EMERGENCY_STOP_RESET", "Owner reset emergency stop",
+                            {"triggered_by": triggered_by, "reason": reason})
+
     def terminate(self, *, triggered_by: str) -> None:
         with self._lock:
             self._terminated = True
