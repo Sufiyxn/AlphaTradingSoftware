@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from backend.execution import MockExecutionProvider, OrderStatus
+from backend.execution import AdapterRegistry, ExecutionRouter, MockExecutionProvider, MockTradingPlatformAdapter, OrderStatus
 from backend.paper_trading import PaperTradingConfig, PaperTradingEngine
 from backend.portfolio import Portfolio
 from backend.risk import RiskEngine
@@ -83,6 +83,16 @@ class PaperTradingTests(unittest.TestCase):
         engine.submit(setup())
         self.assertEqual(engine.on_bar("ABC", NOW, 104, 96), ())
         self.assertEqual(len(portfolio.positions), 1)
+
+    def test_paper_trading_operates_through_universal_router(self):
+        registry = AdapterRegistry()
+        registry.register(MockTradingPlatformAdapter())
+        router = ExecutionRouter(registry, "mock")
+        engine, portfolio = paper(execution=router)
+        result = engine.submit(setup())
+        self.assertTrue(result.accepted)
+        self.assertEqual(len(portfolio.positions), 1)
+        self.assertEqual(router.get_order(result.order.order_id), result.order)
 
 
 if __name__ == "__main__":

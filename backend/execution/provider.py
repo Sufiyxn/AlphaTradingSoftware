@@ -1,32 +1,50 @@
 from datetime import datetime, timezone
-from typing import Protocol, Sequence
+from typing import Sequence
 
+from backend.market_data.models import Quote
 from backend.portfolio.models import Position
 
-from .models import AccountSnapshot, Order, OrderRequest, OrderStatus
+from .capabilities import PlatformCapabilities
+from .interface import ExecutionProvider, TradingPlatformAdapter
+from .models import AccountSnapshot, AssetType, Balance, Fill, Order, OrderRequest, OrderStatus, OrderType
 
 
-class ExecutionProvider(Protocol):
-    def place_order(self, request: OrderRequest) -> Order: ...
-    def cancel_order(self, order_id: str) -> Order: ...
-    def get_order(self, order_id: str) -> Order | None: ...
-    def get_orders(self) -> Sequence[Order]: ...
-    def get_positions(self) -> Sequence[Position]: ...
-    def get_account(self) -> AccountSnapshot: ...
-
-
-class MockExecutionProvider:
-    """Deterministic in-memory execution adapter; never contacts an external venue."""
+class MockTradingPlatformAdapter:
+    """Deterministic local adapter with no network, credentials, or venue access."""
 
     def __init__(self, *, cash: float = 100_000.0, partial_fill_quantity: int | None = None,
-                 fail_orders: bool = False, clock=lambda: datetime(2000, 1, 1, tzinfo=timezone.utc)):
+                 fail_orders: bool = False, clock=lambda: datetime(2000, 1, 1, tzinfo=timezone.utc),
+                 capabilities: PlatformCapabilities | None = None, positions: Sequence[Position] = ()):
         self.cash = cash
         self.partial_fill_quantity = partial_fill_quantity
         self.fail_orders = fail_orders
         self.clock = clock
+        self._capabilities = capabilities or PlatformCapabilities(
+            asset_types=frozenset({AssetType.STOCK}), exchanges=frozenset({"US", "NYSE", "NASDAQ"}),
+            order_types=frozenset(OrderType), short_selling=True, fractional_shares=True,
+            extended_hours=True, order_replacement=True, market_data=True, paper_trading=True)
         self._orders: dict[str, Order] = {}
-        self._positions: dict[str, Position] = {}
+        self._positions = {position.symbol: position for position in positions}
         self._next_id = 1
+        self._connected = True
+
+    def identify(self) -> str:
+        return "mock"
+
+    def capabilities(self) -> PlatformCapabilities:
+        return self._capabilities
+
+    def is_authenticated(self) -> bool:
+        return False
+
+    def connect(self) -> None:
+        self._connected = True
+
+    def disconnect(self) -> None:
+        self._connected = False
+
+    def get_account(self) -> AccountSnapshot:
+        return AccountSnapshot(self.cash, self.cash, "USD", "mock-account", (Balance("USD", self.cash, self.cash, self.cash),))
 
     def place_order(self, request: OrderRequest) -> Order:
         order_id = f"MOCK-{self._next_id:06d}"
@@ -35,15 +53,43 @@ class MockExecutionProvider:
         status = OrderStatus.REJECTED if self.fail_orders else (
             OrderStatus.FILLED if filled == request.quantity else OrderStatus.PARTIALLY_FILLED
         )
-        order = Order(order_id, request, status, filled, request.limit_price if filled else None, self.clock())
+        timestamp = self.clock()
+        fill_price = request.limit_price if request.limit_price is not None else request.stop_price
+        if fill_price is None and filled:
+            fill_price = self.get_quote(request.symbol).price
+        fills = (Fill(filled, fill_price, timestamp),) if filled and fill_price is not None else ()
+        order = Order(order_id, request, status, filled, fill_price if filled else None, timestamp, fills)
         self._orders[order_id] = order
         return order
 
     def cancel_order(self, order_id: str) -> Order:
         order = self._orders[order_id]
-        cancelled = Order(order.order_id, order.request, OrderStatus.CANCELLED, order.filled_quantity, order.average_fill_price, order.created_at)
+        cancelled = Order(order.order_id, order.request, OrderStatus.CANCELLED,
+                          order.filled_quantity, order.average_fill_price, order.created_at,
+                          order.fills, order.rejection_reason)
         self._orders[order_id] = cancelled
         return cancelled
+
+    def replace_order(self, order_id: str, request: OrderRequest) -> Order:
+        existing = self._orders[order_id]
+        replacement = Order(existing.order_id, request, OrderStatus.PENDING, 0, None, existing.created_at)
+        self._orders[order_id] = replacement
+        if self.fail_orders:
+            replacement = Order(existing.order_id, request, OrderStatus.REJECTED, 0, None,
+                               existing.created_at, rejection_reason="mock configured to reject orders")
+        else:
+            qty = min(request.quantity, self.partial_fill_quantity or request.quantity)
+            price = request.limit_price if request.limit_price is not None else request.stop_price
+            if price is None and qty:
+                price = self.get_quote(request.symbol).price
+            status = OrderStatus.FILLED if qty == request.quantity else OrderStatus.PARTIALLY_FILLED
+            fills = (Fill(qty, price, existing.created_at),) if qty and price is not None else ()
+            replacement = Order(existing.order_id, request, status, qty, price, existing.created_at, fills)
+        self._orders[order_id] = replacement
+        return replacement
+
+    def get_quote(self, symbol: str) -> Quote:
+        return Quote(symbol.strip().upper(), self.clock(), 100.0, 0.0)
 
     def get_order(self, order_id: str) -> Order | None:
         return self._orders.get(order_id)
@@ -54,5 +100,6 @@ class MockExecutionProvider:
     def get_positions(self) -> Sequence[Position]:
         return tuple(self._positions.values())
 
-    def get_account(self) -> AccountSnapshot:
-        return AccountSnapshot(self.cash, self.cash, "USD")
+
+class MockExecutionProvider(MockTradingPlatformAdapter):
+    """Legacy name retained for existing paper-trading callers."""

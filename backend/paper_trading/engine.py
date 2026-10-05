@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 
-from backend.execution import ExecutionProvider, MockExecutionProvider, OrderRequest, OrderStatus
+from backend.execution import ExecutionProvider, MockTradingPlatformAdapter, OrderRequest, OrderStatus
 from backend.portfolio import Portfolio
 from backend.risk import RiskEngine
+from backend.risk.models import RiskDecision, RiskStatus
 from backend.strategies.models import Direction, TradeSetup
 
 from .config import PaperTradingConfig
@@ -15,7 +16,7 @@ class PaperTradingEngine:
                  config: PaperTradingConfig | None = None):
         self.risk_engine = risk_engine
         self.portfolio = portfolio
-        self.execution = execution or MockExecutionProvider(cash=portfolio.cash)
+        self.execution = execution or MockTradingPlatformAdapter(cash=portfolio.cash)
         self.config = config or PaperTradingConfig()
         self._records: dict[str, PaperTradeRecord] = {}
         self._setups: dict[str, TradeSetup] = {}
@@ -28,6 +29,13 @@ class PaperTradingEngine:
         decision = self.risk_engine.evaluate(setup, self.portfolio.snapshot())
         if not decision.approved:
             return SubmissionResult(decision, None, None)
+        return self.submit_decision(decision)
+
+    def submit_decision(self, decision: RiskDecision) -> SubmissionResult:
+        """Execute an approved risk decision without evaluating or weakening risk rules."""
+        if decision.status is not RiskStatus.APPROVED or decision.quantity <= 0:
+            return SubmissionResult(decision, None, None)
+        setup = decision.setup
 
         sign = 1 if setup.direction is Direction.LONG else -1
         fill_price = setup.entry_price + sign * self.config.slippage_per_share
