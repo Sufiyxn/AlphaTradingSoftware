@@ -3,6 +3,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from backend.execution import MockExecutionProvider
+from backend.ai import AIAnalysisService
+from backend.database import SQLiteJournalRepository
 from backend.market_data import Bar
 from backend.orchestrator import OrchestratorConfig, OrchestratorStatus, TradingOrchestrator
 from backend.paper_trading import PaperTradingEngine
@@ -96,19 +98,20 @@ class FailingPortfolio(Portfolio):
 
 
 class TradingOrchestratorTests(unittest.TestCase):
-    def make_orchestrator(self, symbols=("AAA",), *, candidates=None, market_failures=(), strategy_failures=(), risk_rejections=(), risk_config=None, execution_fail=False, clock=lambda: NOW):
+    def make_orchestrator(self, symbols=("AAA",), *, candidates=None, market_failures=(), strategy_failures=(), risk_rejections=(), risk_config=None, execution_fail=False, clock=lambda: NOW, ai_analysis=None, journal=None):
         events = []
         universe = SymbolUniverse(symbols)
         portfolio = Portfolio(100_000)
         risk = EventRisk(risk_config, reject=risk_rejections, events=events)
         execution = EventExecution(events, fail_orders=execution_fail)
-        paper = PaperTradingEngine(risk, portfolio, execution)
+        paper = PaperTradingEngine(risk, portfolio, execution, journal=journal)
         scanner = FixtureScanner(candidates if candidates is not None else [candidate(symbol) for symbol in symbols])
         orchestrator = TradingOrchestrator(
             market_data=FixtureMarketData(market_failures), scanner=scanner,
             strategy=FixtureStrategy(strategy_failures, events), risk_engine=risk,
             paper_trading=paper, portfolio=portfolio,
             config=OrchestratorConfig(universe, timedelta(seconds=1), timedelta(days=1)), clock=clock,
+            ai_analysis=ai_analysis, journal=journal,
         )
         return orchestrator, scanner, paper, portfolio, events, execution
 
@@ -151,6 +154,69 @@ class TradingOrchestratorTests(unittest.TestCase):
         self.assertEqual(result.rejected_count, 1)
         self.assertEqual(events, [])
         self.assertEqual(execution.get_orders(), ())
+
+    def test_ai_unavailable_is_advisory_and_never_blocks_risk_or_execution(self):
+        class Unavailable:
+            def analyze(self, proposed, market_context=()):
+                raise RuntimeError("local analysis unavailable")
+
+        orchestrator, _, paper, _, events, _ = self.make_orchestrator(
+            ai_analysis=AIAnalysisService(Unavailable()))
+        result = orchestrator.run_once()
+        self.assertEqual(len(result.approved_trades), 1)
+        self.assertEqual([event[0] for event in events], ["strategy", "risk", "execution"])
+        self.assertTrue(any("AI analysis unavailable" in error for error in orchestrator.state.errors))
+        self.assertEqual(len(paper.trades), 1)
+
+    def test_ai_reject_is_reported_as_advice_and_risk_remains_authoritative(self):
+        from dataclasses import replace
+        from backend.ai import AIRecommendation, MockAIAnalysisProvider
+
+        class RejectAdvice:
+            def analyze(self, proposed, market_context=()):
+                return replace(MockAIAnalysisProvider().analyze(proposed, market_context),
+                               recommendation=AIRecommendation.REJECT)
+
+        orchestrator, _, _, _, events, _ = self.make_orchestrator(
+            ai_analysis=AIAnalysisService(RejectAdvice()))
+        result = orchestrator.run_once()
+        self.assertEqual(len(result.ai_analyses), 1)
+        self.assertEqual(result.ai_analyses[0].recommendation, AIRecommendation.REJECT)
+        self.assertEqual(len(result.approved_trades), 1)
+        self.assertEqual([event[0] for event in events], ["strategy", "risk", "execution"])
+
+    def test_orchestrator_persists_setup_risk_execution_and_trade_lifecycle(self):
+        from backend.ai import MockAIAnalysisProvider
+        journal = SQLiteJournalRepository(":memory:")
+        try:
+            orchestrator, _, paper, _, _, _ = self.make_orchestrator(
+                journal=journal, ai_analysis=AIAnalysisService(MockAIAnalysisProvider()))
+            result = orchestrator.run_once()
+            self.assertEqual(len(result.approved_trades), 1)
+            self.assertEqual(len(result.ai_analyses), 1)
+            self.assertEqual(len(journal.rows("signals")), 1)
+            self.assertEqual(len(journal.rows("risk_decisions")), 1)
+            self.assertEqual(len(journal.rows("ai_analyses")), 1)
+            self.assertEqual(len(journal.rows("orders")), 1)
+            self.assertEqual(len(journal.open_trades()), 1)
+            paper.close("AAA", 55, NOW)
+            self.assertEqual(len(journal.closed_trades()), 1)
+            self.assertEqual(journal.closed_trades()[0]["context_json"]["setup"]["symbol"], "AAA")
+            self.assertEqual(journal.closed_trades()[0]["context_json"]["ai_analysis"]["recommendation"], "SUPPORT")
+        finally:
+            journal.close()
+
+    def test_database_failure_does_not_block_paper_trade(self):
+        class BrokenJournal:
+            def __getattr__(self, name):
+                def fail(*args, **kwargs):
+                    raise RuntimeError("database unavailable")
+                return fail
+
+        orchestrator, _, _, portfolio, _, _ = self.make_orchestrator(journal=BrokenJournal())
+        result = orchestrator.run_once()
+        self.assertEqual(len(result.approved_trades), 1)
+        self.assertEqual(len(portfolio.positions), 1)
 
     def test_risk_rejection_never_reaches_execution(self):
         orchestrator, _, _, _, events, execution = self.make_orchestrator(risk_rejections=("AAA",))

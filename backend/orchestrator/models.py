@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from backend.ai.models import SetupAnalysis
 from backend.paper_trading.models import PaperTradeRecord
 from backend.scanner.models import Opportunity
 
@@ -9,6 +10,8 @@ from backend.scanner.models import Opportunity
 class OrchestratorStatus(str, Enum):
     RUNNING = "RUNNING"
     STOPPED = "STOPPED"
+    PAUSED = "PAUSED"
+    EMERGENCY_STOPPED = "EMERGENCY_STOPPED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,3 +35,4 @@ class CycleResult:
     approved_trades: tuple[PaperTradeRecord, ...]
     rejected_count: int
     errors: tuple[str, ...]
+    ai_analyses: tuple[SetupAnalysis, ...] = ()

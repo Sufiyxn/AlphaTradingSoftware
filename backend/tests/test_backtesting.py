@@ -72,6 +72,10 @@ def engine(strategy=None, **config_values):
 
 
 class BacktestingTests(unittest.TestCase):
+    def test_qualification_rate_cannot_be_configured_below_51_percent(self):
+        with self.assertRaisesRegex(ValueError, "cannot be below the 51% minimum"):
+            BacktestConfig(qualification_win_rate=.50)
+
     def test_long_winner_take_profit_and_one_symbol(self):
         result = engine(FixedSetupStrategy()).run({"ABC": [bar("ABC", 0, 100, 101, 99, 100), bar("ABC", 1, 100, 101, 99, 100), bar("ABC", 2, 100, 101, 99, 100), bar("ABC", 3, 100, 111, 99, 109)]})
         self.assertEqual(result.metrics.total_trades, 1)

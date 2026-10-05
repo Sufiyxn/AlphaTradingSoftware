@@ -30,7 +30,7 @@ class BacktestConfig:
             raise ValueError("fees and slippage cannot be negative")
         if self.min_reward_risk < 2.0:
             raise ValueError("min_reward_risk cannot be below 2.0")
-        if not 0 <= self.qualification_win_rate <= 1:
-            raise ValueError("qualification_win_rate must be between 0 and 1")
+        if not 0.51 <= self.qualification_win_rate <= 1:
+            raise ValueError("qualification_win_rate cannot be below the 51% minimum")
         if self.session_open >= self.session_close:
             raise ValueError("session_open must be earlier than session_close")

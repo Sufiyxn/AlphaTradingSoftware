@@ -94,6 +94,18 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(len(portfolio.positions), 1)
         self.assertEqual(router.get_order(result.order.order_id), result.order)
 
+    def test_kill_switch_blocks_a_previously_approved_submission(self):
+        provider = MockExecutionProvider()
+        risk = RiskEngine()
+        engine, _ = paper(execution=provider, risk=risk)
+        decision = risk.evaluate(setup(), engine.portfolio.snapshot())
+        self.assertTrue(decision.approved)
+        risk.set_kill_switch(True)
+        result = engine.submit_decision(decision)
+        self.assertFalse(result.accepted)
+        self.assertIn("kill switch enabled", result.risk.reasons)
+        self.assertEqual(provider.get_orders(), ())
+
 
 if __name__ == "__main__":
     unittest.main()
