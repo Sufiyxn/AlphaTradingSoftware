@@ -24,6 +24,7 @@ from backend.reporting import DailyReportingService, LocalMockNotifier, LogExpor
 from backend.risk import RiskEngine
 from backend.scanner import MarketScannerService, StrategyAnalyzer, SymbolUniverse
 from backend.strategies import StrategyEngine
+from backend.tradingview import TradingViewWebhookService
 
 from .connections import ConnectionCenter
 
@@ -88,6 +89,15 @@ class ApplicationRuntime:
         self.notifier = LocalMockNotifier()
         self.daily_reports = DailyReportingService(self.repository, self.performance, self.notifier)
         self.exports = LogExportService(self.repository)
+        # TradingView is a signal source only: it authenticates with its own
+        # secret, normalizes at the boundary, and enters the same risk and
+        # paper workflow as every other signal path.
+        self.tradingview = TradingViewWebhookService(
+            settings=self.config.tradingview, paper=self.paper, risk=self.risk,
+            portfolio=self.portfolio, journal=self.repository, clock=self.clock,
+            allowed_symbols=self.orchestrator.config.universe.symbols,
+            max_candidate_price=trading.max_candidate_price,
+        )
         self.owner_controls = None
         if owner_token:
             self.owner_controls = OwnerControlPlane(
@@ -100,6 +110,8 @@ class ApplicationRuntime:
             risk=self.risk, notifier=self.notifier,
             owner_controls_enabled=self.owner_controls is not None, clock=self.clock,
             repository=self.repository, market_data_availability=self.valuation.availability,
+            tradingview_status=self.tradingview.connection_state,
+            tradingview_check=self.tradingview.self_check,
         )
         self._report_stop = threading.Event()
         self._report_thread = threading.Thread(target=self._schedule_reports, name="alpha-daily-report", daemon=True)

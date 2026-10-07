@@ -1,4 +1,5 @@
 import json
+import logging
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from enum import Enum
@@ -118,13 +119,18 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 self._send(400, {"error": str(error)})
 
         def do_POST(self):
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/webhooks/tradingview":
+                # Dedicated webhook authentication: this path never requires
+                # X-Owner-Token and never falls through to owner controls.
+                return self._tradingview_webhook()
             controls = runtime.owner_controls
             if controls is None:
                 return self._send(503, {"error": "owner controls are disabled; set OWNER_CONTROL_TOKEN and restart"})
             token = self.headers.get("X-Owner-Token")
             try:
                 body = self._body()
-                if urlparse(self.path).path == "/api/connections/test":
+                if parsed.path == "/api/connections/test":
                     controls.authorize_owner(token)
                     section = str(body.get("section", ""))
                     result = runtime.connections.test(section)
@@ -141,7 +147,7 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     "/api/control/safe-termination": lambda: controls.terminate(token),
                     "/api/control/configuration": lambda: controls.update_runtime_config(token, str(body.get("key", "")), body.get("value")),
                 }
-                action = actions.get(urlparse(self.path).path)
+                action = actions.get(parsed.path)
                 if action is None:
                     return self._send(404, {"error": "not found"})
                 action()
@@ -150,6 +156,30 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 self._send(401, {"error": str(error)})
             except Exception as error:
                 self._send(400, {"error": str(error)})
+
+        def _tradingview_webhook(self):
+            """POST /api/webhooks/tradingview - authenticated signal ingestion."""
+            try:
+                raw_length = (self.headers.get("Content-Length") or "0").strip()
+                try:
+                    length = int(raw_length)
+                except ValueError:
+                    return self._send(400, {"status": "error", "code": "INVALID_PAYLOAD",
+                                            "message": "Content-Length must be an integer"})
+                if length < 0:
+                    return self._send(400, {"status": "error", "code": "INVALID_PAYLOAD",
+                                            "message": "Content-Length must not be negative"})
+                limit = runtime.tradingview.max_body_bytes
+                if length > limit:
+                    return self._send(413, {"status": "error", "code": "PAYLOAD_TOO_LARGE",
+                                            "message": f"request body exceeds {limit} bytes"})
+                raw = self.rfile.read(length) if length else b""
+                response = runtime.tradingview.handle(raw, self.headers)
+                return self._send(response.status, response.body)
+            except Exception:
+                logging.getLogger(__name__).exception("TradingView webhook request failed")
+                return self._send(500, {"status": "error", "code": "INTERNAL_ERROR",
+                                        "message": "the webhook failed to process the signal"})
 
         def log_message(self, format, *args):
             return

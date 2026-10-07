@@ -14,7 +14,8 @@ class ConnectionCenter:
 
     def __init__(self, *, config, market_data, universe, execution, performance, portfolio,
                  risk, notifier, owner_controls_enabled, clock, repository=None,
-                 market_data_availability=None):
+                 market_data_availability=None, tradingview_status=None,
+                 tradingview_check=None):
         self.config = config
         self.market_data = market_data
         self.universe = universe
@@ -27,6 +28,8 @@ class ConnectionCenter:
         self.clock = clock
         self.repository = repository
         self._availability_source = market_data_availability
+        self._tradingview_status = tradingview_status
+        self._tradingview_check = tradingview_check
         self.last_tests: dict[str, dict] = {}
         self.last_successful: dict[str, datetime] = {}
         if repository is not None:
@@ -48,7 +51,6 @@ class ConnectionCenter:
         broker = self.config.broker.describe()
         ai = self.config.ai.describe()
         notifications = self.config.notifications.describe()
-        tradingview = self.config.tradingview.describe()
         provider_state = self.market_data.status
         return {
             "market_data": {
@@ -112,15 +114,31 @@ class ConnectionCenter:
                 "connection": self.last_tests.get("notifications", _never_tested()),
                 "last_successful_connection": self.last_successful.get("notifications"),
             },
-            "tradingview": {
-                **tradingview,
-                "webhook_available": False,
-                "endpoint_status": "NOT_IMPLEMENTED" if not tradingview["enabled"] else "NOT_INSTALLED",
-                "connection": self.last_tests.get("tradingview", _never_tested()),
-                "last_successful_connection": self.last_successful.get("tradingview"),
-                "last_received_signal": None,
-            },
+            "tradingview": self._tradingview_section(),
         }
+
+    def _tradingview_section(self) -> dict:
+        """Configuration plus live webhook state, never a credential value.
+
+        The webhook reports ``CONNECTED`` only after an authenticated signal
+        has actually been processed; a configured secret on its own reports
+        ``UNAVAILABLE`` (installed, no delivery observed yet) or
+        ``NOT_CONFIGURED``.
+        """
+        settings = self.config.tradingview.describe()
+        live = self._tradingview_status() if self._tradingview_status is not None else {}
+        section = {**settings, **live}
+        section.setdefault("state", "NOT_CONFIGURED")
+        section.setdefault("reason", None)
+        section.setdefault("endpoint_status", "NOT_INSTALLED")
+        section.setdefault("webhook_available", False)
+        section.setdefault("last_received_signal", None)
+        section.setdefault("signals_accepted", 0)
+        section.setdefault("signals_rejected", 0)
+        section.setdefault("signals_duplicate", 0)
+        section["connection"] = self.last_tests.get("tradingview", _never_tested())
+        section["last_successful_connection"] = self.last_successful.get("tradingview")
+        return section
 
     def market_data_availability(self) -> dict:
         """Five-state availability from the market-data bridge, honest about nothing."""
@@ -169,9 +187,12 @@ class ConnectionCenter:
             if not tv.enabled or not tv.configured:
                 result = _not_configured(tested_at, "TradingView webhook is not configured; "
                                                     "set TRADINGVIEW_ENABLED and TRADINGVIEW_WEBHOOK_SECRET")
-            else:
+            elif self._tradingview_check is None:
                 result = _unsupported(tested_at, "the TradingView webhook endpoint is not installed; "
                                                  "no endpoint was opened")
+            else:
+                passed, detail = self._tradingview_check()
+                result = _test_result(passed, tested_at, detail)
         else:
             result = _unsupported(tested_at, "No external adapter is installed; no network request was made")
         self.last_tests[section] = result

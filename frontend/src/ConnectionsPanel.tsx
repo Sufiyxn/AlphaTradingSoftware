@@ -10,6 +10,9 @@ type Section = {
   webhook_available?: boolean; secret_configured?: boolean; endpoint_status?: string
   last_received_signal?: string | null; connection?: TestStatus; account_connection?: TestStatus
   capabilities?: unknown
+  endpoint?: string; ready?: boolean; state?: string; reason?: string | null
+  signals_accepted?: number; signals_rejected?: number; signals_duplicate?: number
+  allowed_strategies?: string[]; max_signal_age_seconds?: number; stale_after_seconds?: number
 }
 type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; tradingview: Section }
 type Check = { key: string; label: string; status: string; passed: boolean; detail: string }
@@ -53,7 +56,7 @@ export default function ConnectionsPanel({ token }: { token: string }) {
         ['Provider', connections?.notifications.provider], ['Destination', fieldState(connections?.notifications.destination_configured)], ['Enabled', connections?.notifications.enabled ? 'Yes' : 'No'], ['Last successful', connections?.notifications.last_successful_connection ? new Date(connections.notifications.last_successful_connection).toLocaleString() : 'None'],
       ]} />
       <ConnectionCard title="TradingView" section="tradingview" data={connections?.tradingview} pending={pending} onTest={test} fields={[
-        ['Webhook', connections?.tradingview.endpoint_status], ['Enabled', connections?.tradingview.enabled ? 'Yes' : 'No'], ['Secret configured', fieldState(connections?.tradingview.secret_configured)], ['Last signal', connections?.tradingview.last_received_signal || 'None'],
+        ['Endpoint', connections?.tradingview.endpoint], ['Role', connections?.tradingview.role], ['Enabled', connections?.tradingview.enabled ? 'Yes' : 'No'], ['Secret configured', fieldState(connections?.tradingview.secret_configured)], ['State', connections?.tradingview.state], ['State detail', connections?.tradingview.reason ?? 'None'], ['Signals', `${connections?.tradingview.signals_accepted ?? 0} accepted · ${connections?.tradingview.signals_rejected ?? 0} rejected · ${connections?.tradingview.signals_duplicate ?? 0} duplicate`], ['Strategies', (connections?.tradingview.allowed_strategies ?? []).length ? connections?.tradingview.allowed_strategies?.join(', ') : 'Any allowed strategy'], ['Last signal', connections?.tradingview.last_received_signal || 'None'],
       ]} />
     </div>
     <div className="readiness-card"><div className="readiness-head"><div><p className="eyebrow">PRE-FLIGHT CHECKLIST</p><h3>Live readiness</h3></div><span className="locked-pill">{readiness?.live_mode ?? 'LOCKED'}</span></div>
@@ -67,7 +70,7 @@ export default function ConnectionsPanel({ token }: { token: string }) {
 
 function ConnectionCard({ title, section, data, pending, onTest, fields }: { title: string; section: string; data?: Section; pending: string; onTest: (section: string) => void; fields: [string, string | undefined][] }) {
   const result = data?.connection ?? data?.account_connection
-  const configured = data?.configured || data?.provider === 'LOCAL/MOCK' || data?.provider === 'MOCK'
+  const configured = data?.ready ?? (data?.configured || data?.provider === 'LOCAL/MOCK' || data?.provider === 'MOCK')
   return <article className="connection-card"><div className="connection-card-head"><div><h3>{title}</h3><span className={`connection-state ${configured ? 'state-configured' : 'state-empty'}`}>{configured ? 'CONFIGURED' : 'NOT CONFIGURED'}</span></div><button className="test-connection" onClick={() => void onTest(section)} disabled={pending === section}>{pending === section ? 'Checking…' : 'Test connection'}</button></div><dl>{fields.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value || 'Not set'}</dd></div>)}<div><dt>Connection test</dt><dd className={result?.status === 'PASSED' ? 'positive' : ''}>{result?.status ?? 'NOT TESTED'}</dd></div>{result?.tested_at && <div><dt>Last test</dt><dd>{new Date(result.tested_at).toLocaleString()}</dd></div>}{result?.error && <div><dt>Test detail</dt><dd className="negative">{result.error}</dd></div>}</dl></article>
 }
 

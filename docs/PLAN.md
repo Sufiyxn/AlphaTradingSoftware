@@ -1,6 +1,6 @@
 # Alpha Trading Platform — Binding 17-Phase Roadmap
 
-> **Approved.** Phases 1–3 are complete and verified. Phases 4–17 are binding scope.
+> **Approved.** Phases 1–4 are complete and verified. Phases 5–17 are binding scope.
 > **Do not reorder phases without explicit approval.** Each phase ends only after the verification
 > protocol below passes with exact numbers reported.
 
@@ -57,7 +57,7 @@
 ### Per-phase verification protocol
 
 - `python -m pytest backend/tests -q` (with `PYTHONDONTWRITEBYTECODE=1`, `-p no:cacheprovider`) —
-  count must not drop below the previous phase (162 as of Phase 3).
+  count must not drop below the previous phase (203 as of Phase 4).
 - `node node_modules\typescript\bin\tsc --noEmit -p tsconfig.json` in `frontend/`.
 - `npm.cmd run build` in `frontend/`.
 - HTTP smoke against a running instance: `/api/status`, `/api/positions`, `/api/readiness`,
@@ -76,8 +76,8 @@
 | 1 | Configuration / Mode Foundation | **DONE** |
 | 2 | Remove Synthetic/Demo Production Runtime | **DONE** |
 | 3 | Real Market-Data Bridge + Paper Position Lifecycle | **DONE** |
-| 4 | TradingView Integration | **NEXT** |
-| 5 | Real Market-Data Providers | pending |
+| 4 | TradingView Integration | **DONE** |
+| 5 | Real Market-Data Providers | **NEXT** |
 | 6 | Alpaca Broker Integration | pending |
 | 7 | TradingPipeline Consolidation | pending |
 | 8 | Risk Hardening | pending |
@@ -146,27 +146,53 @@
 - Tests: `test_market_data_bridge.py` (10), `test_position_valuation.py` (17), 3 existing tests
   adapted to the stricter FRESH-mark contract.
 
+### PHASE 4 — TradingView Integration · DONE (203 passed, 30 subtests)
+
+- **Endpoint:** `POST /api/webhooks/tradingview` (`backend/core/server.py`) — route-first, never
+  requires `X-Owner-Token`, hard body limit (413), 500 with a machine-readable body on failure.
+- **Auth:** `backend/tradingview/auth.py` — dedicated `TRADINGVIEW_WEBHOOK_SECRET`, constant-time
+  HMAC (`X-Webhook-Signature: sha256=<hex>`) or payload `secret` field; 401 `AUTH_FAILED`; the
+  secret is never logged, returned, or stored in SQLite.
+- **Boundary:** `backend/tradingview/payload.py` — JSON object decode with size limit, TradingView
+  alert field aliases, action vocabulary (`ENTER_LONG` / `ENTER_SHORT` / `EXIT` plus aliases), and
+  deterministic body-hash / explicit-id event identity.
+- **Signal layer:** `backend/signals/` — `NormalizedSignal`, `SignalAction`, shared validation
+  (symbol shape and universe membership, price levels, whole-number quantity, timestamps with
+  `max_signal_age_seconds` and 60 s future tolerance, strategy allowlist) and
+  `to_trade_setup()`.
+- **Service:** `backend/tradingview/service.py` — fail-closed order (enabled → body size →
+  signature → payload secret → normalize → replay → risk → execution) under one lock;
+  `RiskEngine.evaluate()` runs before any execution; an alert quantity only caps the risk-approved
+  quantity; entry stays strictly below `max_candidate_price`; exits close the full position at the
+  reported price.
+- **Idempotency:** `backend/signals/idempotency.py` — `body:<sha256>` plus `id:<explicit>` keys,
+  `SIGNAL_PROCESSED` journal hydration on restart, `409 DUPLICATE_SIGNAL` on replay; auth,
+  validation, and 5xx outcomes are not remembered so a corrected retry is processed.
+- **Responses:** 202 `ACCEPTED`; 400 `INVALID_PAYLOAD` (with `reason`); 401 `AUTH_FAILED`;
+  409 `DUPLICATE_SIGNAL`; 413 `PAYLOAD_TOO_LARGE`; 422 `RISK_REJECTED` / `NO_OPEN_POSITION` /
+  `QUANTITY_MISMATCH`; 503 `NOT_CONFIGURED` / `EXECUTION_UNAVAILABLE`; 500 `INTERNAL_ERROR`.
+- **Connection state:** `ConnectionCenter` `tradingview` section plus a local authentication
+  `self_check` that makes no network request — `NOT_CONFIGURED` / `UNAVAILABLE` / `CONNECTED` /
+  `STALE` / `ERROR`; a configured secret alone is never `CONNECTED`.
+- **Config and docs:** `TradingViewSettings` gained `max_signal_age_seconds`,
+  `stale_after_seconds`, `max_body_bytes` validation and `describe()` fields; `.env.example`
+  keys; README section; `docs/TRADINGVIEW.md`.
+- **Frontend:** `ConnectionsPanel.tsx` TradingView card reports endpoint, role, state and reason,
+  signal counters, allowed strategies, and last signal; the card badge follows `ready`.
+- **Verification:** `203 passed, 30 subtests`; `tsc --noEmit` clean; `npm run build` succeeds;
+  HTTP smoke against a running instance (`/api/status`, `/api/positions`, `/api/readiness`,
+  `/api/connections` parsed as JSON; signed alert → 202, identical replay → 409, bad signature →
+  401, malformed body → 400, disabled endpoint → 503 `NOT_CONFIGURED`, connection test →
+  `PASSED`, position reported `UNPRICED` with `current_price: null`, no secret in any payload,
+  no `MOCK` in status); `git diff` reviewed; no synthetic data introduced.
+- **Invariants held:** zero fabricated production market data; the alert price is signal/entry
+  metadata only and never an ongoing market price (`UNPRICED` without a real feed); TradingView is
+  a signal source only — no direct TradingView → broker execution and no bypass of `RiskEngine` or
+  the execution abstraction; test-only mocks stay in `backend/testing/` and `backend/tests/`.
+
 ---
 
-## PHASE 4 — TradingView Integration · **NEXT**
-
-- TradingView webhook ingestion
-- dedicated webhook secret/HMAC validation
-- signal validation and normalization
-- idempotency/replay protection
-- clear accepted/rejected responses
-- TradingView connection/configuration state
-- integrate signals into the existing paper workflow
-- **no direct TradingView → broker execution**
-- **no fabricated pricing**
-
-**Phase 4 invariants (must hold on completion):** zero fabricated production market data; zero fake
-demo accounts, balances, trades or prices; `UNPRICED` when continuous real pricing is unavailable;
-TradingView is a signal source, not a broker and not a price source; no automatic SL/TP without a
-valid current real price; test-only mocks remain quarantined to `backend/testing/` and
-`backend/tests/`.
-
-### PHASE 5 — Real Market-Data Providers
+### PHASE 5 — Real Market-Data Providers · **NEXT**
 - Polygon, Alpha Vantage, provider registry, real historical/current data, normalized provider
   interface, honest connection states, quote freshness/staleness, provider errors/retries where
   appropriate, no synthetic production data.

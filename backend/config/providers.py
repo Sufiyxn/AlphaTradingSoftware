@@ -211,24 +211,44 @@ class TradingViewSettings:
     webhook_secret: str | None = None
     allowed_strategies: tuple[str, ...] = ()
     max_body_bytes: int = 8192
+    max_signal_age_seconds: float = 300.0
+    stale_after_seconds: float = 86_400.0
+
+    def __post_init__(self) -> None:
+        if self.max_body_bytes <= 0 or self.max_body_bytes > 65536:
+            raise ValueError("max_body_bytes must be between 1 and 65536")
+        if self.max_signal_age_seconds <= 0:
+            raise ValueError("max_signal_age_seconds must be positive")
+        if self.stale_after_seconds <= 0:
+            raise ValueError("stale_after_seconds must be positive")
 
     @property
     def configured(self) -> bool:
         return bool(self.webhook_secret)
 
     @property
-    def available(self) -> bool:
+    def ready(self) -> bool:
+        """Endpoint can accept and authenticate an alert right now."""
         return self.enabled and self.configured
+
+    @property
+    def available(self) -> bool:
+        return self.ready
 
     def describe(self) -> dict:
         return {
             "enabled": self.enabled,
             "configured": self.configured,
+            "ready": self.ready,
+            "available": self.available,
             "secret_configured": bool(self.webhook_secret),
             "authentication": "HMAC_SHARED_SECRET" if self.webhook_secret else "UNAVAILABLE",
             "allowed_strategies": list(self.allowed_strategies),
             "max_body_bytes": self.max_body_bytes,
+            "max_signal_age_seconds": self.max_signal_age_seconds,
+            "stale_after_seconds": self.stale_after_seconds,
             "endpoint": "/api/webhooks/tradingview",
+            "role": "SIGNAL_SOURCE_ONLY",
         }
 
 

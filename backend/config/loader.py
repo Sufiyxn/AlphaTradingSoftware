@@ -281,14 +281,20 @@ def _broker_settings(env: Mapping[str, str]) -> BrokerSettings:
 def _tradingview_settings(env: Mapping[str, str]) -> TradingViewSettings:
     strategies = _get(env, "TRADINGVIEW_ALLOWED_STRATEGIES") or ""
     allowed = tuple(item.strip() for item in strategies.split(",") if item.strip())
-    body_bytes = _int(env, "TRADINGVIEW_MAX_BODY_BYTES", 8192)
-    if body_bytes <= 0 or body_bytes > 65536:
-        raise ValueError("TRADINGVIEW_MAX_BODY_BYTES must be between 1 and 65536")
+    defaults = TradingViewSettings()
     return TradingViewSettings(
         enabled=parse_bool(_get(env, "TRADINGVIEW_ENABLED"), default=False),
         webhook_secret=_get(env, "TRADINGVIEW_WEBHOOK_SECRET"),
         allowed_strategies=allowed,
-        max_body_bytes=body_bytes,
+        max_body_bytes=_int(env, "TRADINGVIEW_MAX_BODY_BYTES", defaults.max_body_bytes),
+        max_signal_age_seconds=parse_number(
+            _get(env, "TRADINGVIEW_MAX_SIGNAL_AGE_SECONDS"),
+            default=defaults.max_signal_age_seconds,
+            name="TRADINGVIEW_MAX_SIGNAL_AGE_SECONDS"),
+        stale_after_seconds=parse_number(
+            _get(env, "TRADINGVIEW_STALE_AFTER_SECONDS"),
+            default=defaults.stale_after_seconds,
+            name="TRADINGVIEW_STALE_AFTER_SECONDS"),
     )
 
 

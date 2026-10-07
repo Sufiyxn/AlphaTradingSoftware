@@ -50,10 +50,17 @@ A fresh clone with an empty `.env` boots **fully disconnected**: no market data 
 - `GET /api/opportunities`, `/api/quotes`, `/api/positions`, `/api/trades`
 - `GET /api/performance`, `/api/reports`, `/api/logs`
 - Authenticated `POST /api/control/start`, `/stop`, `/pause`, `/resume`, `/emergency-stop`, `/reset-emergency-stop`, `/terminate`, `/configuration`
+- `POST /api/webhooks/tradingview` (its own shared secret, no owner token required)
 
 Reports can be generated on demand and are also written by a local scheduler after the US regular session. The current notifier is an in-process local sink; it does not send email, SMS, or third-party messages. `GET /api/logs` supports `kind`, `format=json|csv`, inclusive `start`/`end` dates, and `symbol` filters.
 
 The displayed US session uses standard weekday, daylight-saving, holiday, and early-close rules from the Python standard library. One-off exchange closures are not represented.
+
+## TradingView webhook
+
+`POST /api/webhooks/tradingview` accepts TradingView alerts when `TRADINGVIEW_ENABLED=true` and `TRADINGVIEW_WEBHOOK_SECRET` is set. The endpoint authenticates with an `X-Webhook-Signature: sha256=<hex>` HMAC of the request body (or a `secret` field in the payload), never with the owner token, and never echoes the secret. Each delivery is validated and normalized (`backend/signals/`), checked for duplicates by body hash and explicit event id, routed through the `RiskEngine`, and only then handed to the existing paper execution path - there is no direct TradingView to broker execution.
+
+Responses are machine-readable (`202 ACCEPTED`, `400 INVALID_PAYLOAD`, `401 AUTH_FAILED`, `409 DUPLICATE_SIGNAL`, `413 PAYLOAD_TOO_LARGE`, `422 RISK_REJECTED` and related business rejections, `503 NOT_CONFIGURED`/`EXECUTION_UNAVAILABLE`, `500 INTERNAL_ERROR`). The alert price is signal/entry metadata only: it never becomes a position's ongoing market price, so a position opened this way stays `UNPRICED` until a real market-data provider is connected. Full payload schema, aliases, validation rules, and connection states are documented in `docs/TRADINGVIEW.md`.
 
 ## Data and trading limits
 
@@ -72,7 +79,7 @@ Because the portfolio is in-memory but every trade is journaled, `ApplicationRun
 
 Deterministic fixtures used by the automated tests live in `backend/testing`. `ApplicationRuntime` never imports them; passing a fixture into the runtime happens only from a test.
 
-The **Connections & Live Setup** section reports configuration presence for market data, platform, AI, notifications, and TradingView. Each section reports `configured` (credentials supplied), `implemented` (this build ships the adapter), and `state` (`CONFIGURED` or `NOT_CONFIGURED`), and a connection test returns `NOT_CONFIGURED` rather than a pass when nothing is connected. No check makes a network request. Secret values are never returned by the API or stored in SQLite. Live mode is locked until the live gate opens.
+The **Connections & Live Setup** section reports configuration presence for market data, platform, AI, notifications, and TradingView. Each section reports `configured` (credentials supplied), `implemented` (this build ships the adapter), and `state` (`CONFIGURED` or `NOT_CONFIGURED`), and a connection test returns `NOT_CONFIGURED` rather than a pass when nothing is connected. TradingView additionally reports a live webhook state - `NOT_CONFIGURED`, `UNAVAILABLE`, `CONNECTED`, `STALE`, or `ERROR` - that only reaches `CONNECTED` after an authenticated signal has actually been processed; its connection test is a local authentication self-check. No check makes a network request. Secret values are never returned by the API or stored in SQLite. Live mode is locked until the live gate opens.
 
 The strategy/risk/backtest modules are available for local development. Risk remains between strategy evaluation and paper execution, including strict entry below $100, 2:1 minimum reward/risk, per-trade and daily loss limits, exposure/position limits, and the kill switch. Configuration can only tighten those limits, never widen them. Performance qualification requires a sufficient evaluation sample and at least 51% measured win rate. Fixture results are not a profitability claim or guarantee.
 
