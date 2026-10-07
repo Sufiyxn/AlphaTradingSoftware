@@ -3,8 +3,9 @@ import logging
 from dataclasses import replace
 
 from backend.database import JournalRepository
-from backend.execution import ExecutionProvider, MockTradingPlatformAdapter, OrderRequest, OrderStatus
+from backend.execution import ExecutionProvider, LocalPaperAdapter, OrderRequest, OrderStatus
 from backend.portfolio import Portfolio
+from backend.portfolio.models import PriceState
 from backend.risk import RiskEngine
 from backend.risk.models import RiskDecision, RiskStatus
 from backend.strategies.models import Direction, TradeSetup
@@ -14,15 +15,26 @@ from .models import PaperTradeRecord, SubmissionResult
 
 
 class PaperTradingEngine:
+    """Executes approved risk decisions and manages open paper trades.
+
+    Automatic stop-loss/take-profit evaluation runs only against a FRESH real
+    price - one produced by a connected market-data provider inside the
+    configured staleness window. An unpriced or stale position is never exited
+    automatically, and no price is ever derived from an entry, a signal, or a
+    previous mark.
+    """
+
     def __init__(self, risk_engine: RiskEngine, portfolio: Portfolio,
                  execution: ExecutionProvider | None = None,
                  config: PaperTradingConfig | None = None,
-                 journal: JournalRepository | None = None):
+                 journal: JournalRepository | None = None,
+                 *, clock=None):
         self.risk_engine = risk_engine
         self.portfolio = portfolio
-        self.execution = execution or MockTradingPlatformAdapter(cash=portfolio.cash)
+        self.execution = execution or LocalPaperAdapter(cash=portfolio.cash)
         self.config = config or PaperTradingConfig()
         self.journal = journal
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._records: dict[str, PaperTradeRecord] = {}
         self._setups: dict[str, TradeSetup] = {}
 
@@ -69,10 +81,9 @@ class PaperTradingEngine:
         return SubmissionResult(decision, order, record)
 
     def on_bar(self, symbol: str, timestamp: datetime, high: float, low: float) -> tuple[PaperTradeRecord, ...]:
-        """Update marks and close touched positions; stop wins if both levels hit."""
+        """Close touched positions from a real bar; stop wins if both levels hit."""
         symbol = symbol.strip().upper()
-        position = next((item for item in self.portfolio.positions if item.symbol == symbol), None)
-        if position is None:
+        if not self._auto_exit_allowed(symbol):
             return ()
         closed = []
         for order_id, record in tuple(self._records.items()):
@@ -87,29 +98,52 @@ class PaperTradingEngine:
             sign = 1 if record.direction is Direction.LONG else -1
             raw_exit = record.stop_price if stop_hit else record.target_price
             exit_price = raw_exit - sign * self.config.slippage_per_share
-            fee = record.quantity * self.config.commission_per_share
-            self.portfolio.update_price(symbol, exit_price)
-            portfolio_pnl = self.portfolio.close_position(symbol, record.quantity, exit_price, fees=fee, timestamp=timestamp)
-            trade_pnl = (exit_price - record.entry_price) * sign * record.quantity - fee
             reason = "STOP" if stop_hit else "TARGET"
-            self._journal_call("record_trade_close", order_id, timestamp, exit_price, trade_pnl,
-                               context={"reason": reason, "portfolio_realized_pnl": portfolio_pnl})
-            self._journal_call("record_position_event", timestamp, symbol, "CLOSED",
-                               {"order_id": order_id, "quantity": record.quantity, "price": exit_price,
-                                "pnl": trade_pnl, "reason": reason})
-            self._records.pop(order_id)
-            self._setups.pop(order_id, None)
-            closed.append(record)
+            if self._settle(order_id, record, symbol, exit_price, timestamp, reason):
+                closed.append(record)
+        return tuple(closed)
+
+    def on_quote(self, symbol: str, timestamp: datetime, price: float) -> tuple[PaperTradeRecord, ...]:
+        """Close touched positions from a single fresh real quote.
+
+        Requires the position to already carry a FRESH mark, so no automatic
+        exit can ever run off a stale, missing, or invented price.
+        """
+        symbol = symbol.strip().upper()
+        if price <= 0:
+            raise ValueError("price must be positive")
+        if not self._auto_exit_allowed(symbol):
+            return ()
+        self.portfolio.update_price(symbol, price, timestamp=timestamp, state=PriceState.FRESH)
+        closed = []
+        for order_id, record in tuple(self._records.items()):
+            if record.symbol != symbol:
+                continue
+            if record.direction is Direction.LONG:
+                stop_hit, target_hit = price <= record.stop_price, price >= record.target_price
+            else:
+                stop_hit, target_hit = price >= record.stop_price, price <= record.target_price
+            if not stop_hit and not target_hit:
+                continue
+            sign = 1 if record.direction is Direction.LONG else -1
+            exit_price = price - sign * self.config.slippage_per_share
+            reason = "STOP" if stop_hit else "TARGET"
+            if self._settle(order_id, record, symbol, exit_price, timestamp, reason):
+                closed.append(record)
         return tuple(closed)
 
     def close(self, symbol: str, price: float, timestamp: datetime | None = None) -> float:
-        position = next((item for item in self.portfolio.positions if item.symbol == symbol.strip().upper()), None)
+        """Owner-authorized manual close. A real exit price is always required."""
+        position = next((item for item in self.portfolio.positions
+                         if item.symbol == symbol.strip().upper()), None)
         if position is None:
             raise KeyError(symbol)
+        if price is None:
+            raise ValueError("a manual close requires an explicit real exit price")
         sign = 1 if position.direction is Direction.LONG else -1
         fill = price - sign * self.config.slippage_per_share
         fees = position.quantity * self.config.commission_per_share
-        closed_at = timestamp or datetime.now(timezone.utc)
+        closed_at = timestamp or self.clock()
         pnl = self.portfolio.close_position(symbol, price=fill, fees=fees, timestamp=closed_at)
         for order_id, record in tuple(self._records.items()):
             if record.symbol == symbol.strip().upper():
@@ -122,6 +156,39 @@ class PaperTradingEngine:
                 del self._records[order_id]
                 self._setups.pop(order_id, None)
         return pnl
+
+    def restore_trade(self, record: PaperTradeRecord, setup: TradeSetup | None = None) -> None:
+        """Re-arm a persisted open trade after a restart."""
+        self._records[record.order_id] = record
+        if setup is not None:
+            self._setups[record.order_id] = setup
+
+    def _auto_exit_allowed(self, symbol: str) -> bool:
+        position = next((item for item in self.portfolio.positions if item.symbol == symbol), None)
+        if position is None:
+            return False
+        if position.price_state is not PriceState.FRESH:
+            return False
+        if position.price_as_of is None:
+            return False
+        return True
+
+    def _settle(self, order_id: str, record: PaperTradeRecord, symbol: str,
+                exit_price: float, timestamp: datetime, reason: str) -> bool:
+        fee = record.quantity * self.config.commission_per_share
+        self.portfolio.update_price(symbol, exit_price, timestamp=timestamp, state=PriceState.FRESH)
+        portfolio_pnl = self.portfolio.close_position(
+            symbol, record.quantity, exit_price, fees=fee, timestamp=timestamp)
+        sign = 1 if record.direction is Direction.LONG else -1
+        trade_pnl = (exit_price - record.entry_price) * sign * record.quantity - fee
+        self._journal_call("record_trade_close", order_id, timestamp, exit_price, trade_pnl,
+                           context={"reason": reason, "portfolio_realized_pnl": portfolio_pnl})
+        self._journal_call("record_position_event", timestamp, symbol, "CLOSED",
+                           {"order_id": order_id, "quantity": record.quantity, "price": exit_price,
+                            "pnl": trade_pnl, "reason": reason})
+        self._records.pop(order_id)
+        self._setups.pop(order_id, None)
+        return True
 
     def _journal_call(self, method: str, *args, **kwargs) -> None:
         if self.journal is None:

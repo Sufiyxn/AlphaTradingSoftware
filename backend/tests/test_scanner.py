@@ -11,7 +11,7 @@ from backend.scanner import (
     SymbolUniverse,
     TemporaryTestAnalyzer,
 )
-from backend.market_data.mock_provider import MockMarketDataProvider
+from backend.testing import MockMarketDataProvider
 
 
 NOW = datetime(2024, 1, 2, 14, 33, tzinfo=timezone.utc)

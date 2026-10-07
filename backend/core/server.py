@@ -5,7 +5,7 @@ from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .config import load_settings
+from .config import load_config
 from .runtime import ApplicationRuntime
 from backend.backtesting import BacktestEngine
 from backend.market_data.session import market_session
@@ -43,7 +43,7 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
             path, query = parsed.path, parse_qs(parsed.query)
             try:
                 if path == "/api/health":
-                    result = {"status": "ok", "service": "alpha-trading-platform", "mode": "PAPER"}
+                    result = {"status": "ok", "service": "alpha-trading-platform", "mode": runtime.mode}
                 elif path == "/api/status":
                     result = runtime.status()
                 elif path == "/api/opportunities":
@@ -51,22 +51,7 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 elif path == "/api/quotes":
                     result = {"quotes": runtime.market_data.get_latest(runtime.orchestrator.config.universe.symbols)}
                 elif path == "/api/positions":
-                    open_by_symbol = {trade.symbol: trade for trade in runtime.paper.trades}
-                    positions = []
-                    for position in runtime.portfolio.positions:
-                        trade = open_by_symbol.get(position.symbol)
-                        risk = abs(trade.entry_price - trade.stop_price) if trade else None
-                        sign = 1 if position.direction.value == "LONG" else -1
-                        positions.append({"symbol": position.symbol, "direction": position.direction,
-                                          "quantity": position.quantity,
-                                          "entry_price": position.average_entry_price,
-                                          "current_price": position.market_price,
-                                          "stop_price": trade.stop_price if trade else None,
-                                          "target_price": trade.target_price if trade else None,
-                                          "unrealized_pnl": position.unrealized_pnl,
-                                          "r_multiple": ((position.market_price - position.average_entry_price) * sign / risk) if risk else None,
-                                          "status": "OPEN"})
-                    result = {"positions": positions, "portfolio": runtime.portfolio.snapshot()}
+                    result = _positions_payload(runtime)
                 elif path == "/api/portfolio":
                     result = runtime.portfolio.snapshot()
                 elif path == "/api/trades":
@@ -105,7 +90,7 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     result = json.loads(exported)
                 elif path == "/api/configuration":
                     config = runtime.orchestrator.config
-                    result = {"mode": "PAPER", "universe": config.universe.symbols,
+                    result = {"mode": runtime.mode, "universe": config.universe.symbols,
                               "scan_interval_seconds": config.scan_interval.total_seconds(),
                               "history_lookback_days": config.history_lookback.total_seconds() / 86400,
                               "max_candidate_price": config.max_candidate_price,
@@ -121,8 +106,8 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 elif path in ("/api/readiness", "/api/connection/readiness"):
                     result = runtime.connections.readiness()
                 elif path == "/api/backtest":
-                    start = datetime(2024, 1, 2, 0, tzinfo=runtime.clock().tzinfo)
-                    end = datetime(2024, 1, 3, 0, tzinfo=runtime.clock().tzinfo)
+                    end = runtime.clock()
+                    start = end - runtime.orchestrator.config.history_lookback
                     histories = {symbol: runtime.market_data.get_historical(symbol, start, end)
                                  for symbol in runtime.orchestrator.config.universe.symbols}
                     result = BacktestEngine().run(histories)
@@ -172,6 +157,51 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
     return ThreadingHTTPServer((host, port), Handler)
 
 
+def _positions_payload(runtime: ApplicationRuntime) -> dict:
+    """Open positions with an explicit priced/unpriced state and the reason.
+
+    An unpriced position reports ``current_price`` and ``unrealized_pnl`` as
+    ``null`` so no consumer can render a fabricated $0 as a real valuation.
+    """
+    open_by_symbol = {trade.symbol: trade for trade in runtime.paper.trades}
+    positions = []
+    for position in runtime.portfolio.positions:
+        trade = open_by_symbol.get(position.symbol)
+        risk = abs(trade.entry_price - trade.stop_price) if trade else None
+        sign = 1 if position.direction.value == "LONG" else -1
+        marked = position.market_price
+        positions.append({
+            "symbol": position.symbol, "direction": position.direction,
+            "quantity": position.quantity,
+            "entry_price": position.average_entry_price,
+            "current_price": marked,
+            "price_state": position.price_state.value,
+            "price_as_of": position.price_as_of,
+            "price_age_seconds": ((runtime.clock() - position.price_as_of).total_seconds()
+                                  if position.price_as_of is not None else None),
+            "price_reason": position.price_reason,
+            "stop_price": trade.stop_price if trade else None,
+            "target_price": trade.target_price if trade else None,
+            "unrealized_pnl": position.unrealized_pnl,
+            "r_multiple": ((marked - position.average_entry_price) * sign / risk)
+                          if (risk and marked is not None) else None,
+            "auto_exit_enabled": position.auto_exit_enabled,
+            "status": "OPEN",
+        })
+    availability = runtime.valuation.availability()
+    snapshot = runtime.portfolio.snapshot()
+    return {
+        "positions": positions,
+        "portfolio": snapshot,
+        "market_data_availability": availability["state"],
+        "market_data_availability_reason": availability["reason"],
+        "market_data_last_quote_at": availability["last_quote_at"],
+        "market_data_stale_after_seconds": availability["stale_after_seconds"],
+        "valuation_status": snapshot.valuation_status,
+        "unpriced_position_count": snapshot.unpriced_position_count,
+    }
+
+
 def _one(query, key):
     values = query.get(key, [])
     return values[0] if values else None
@@ -195,8 +225,10 @@ def _json_default(value):
 
 
 def main() -> None:
-    settings = load_settings()
-    runtime = ApplicationRuntime(database_path=settings.database_path, owner_token=settings.owner_token)
+    config = load_config()
+    settings = config.app
+    runtime = ApplicationRuntime(database_path=settings.database_path,
+                                 owner_token=settings.owner_token, config=config)
     server = create_server(runtime, settings.host, settings.port)
     if runtime.owner_controls is not None:
         runtime.owner_controls._shutdown = server.shutdown

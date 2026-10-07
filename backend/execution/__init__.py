@@ -1,7 +1,8 @@
-"""Universal broker-neutral execution abstractions and local mock adapter."""
+"""Broker-neutral execution abstractions, the product paper adapter, and test fixtures."""
 
 from .capabilities import PlatformCapabilities
 from .interface import ExecutionProvider, TradingPlatformAdapter
+from .local_paper import LocalPaperAdapter, NO_PRICE_REASON
 from .models import (
     AccountSnapshot, AssetType, Balance, ExecutionResult, Fill, Instrument,
     MarketSession, Order, OrderRequest, OrderStatus, OrderType, UniversalPosition,
@@ -13,7 +14,8 @@ from .router import ExecutionRouter
 
 __all__ = [
     "AccountSnapshot", "AdapterRegistry", "AssetType", "Balance", "ExecutionProvider",
-    "ExecutionResult", "ExecutionRouter", "Fill", "Instrument", "MarketSession", "MockExecutionProvider",
-    "MockTradingPlatformAdapter", "Order", "OrderRequest", "OrderStatus", "OrderType",
+    "ExecutionResult", "ExecutionRouter", "Fill", "Instrument", "LocalPaperAdapter",
+    "MarketSession", "MockExecutionProvider", "MockTradingPlatformAdapter",
+    "NO_PRICE_REASON", "Order", "OrderRequest", "OrderStatus", "OrderType",
     "PlatformCapabilities", "TradingPlatformAdapter", "UniversalPosition", "UniversalQuote",
 ]

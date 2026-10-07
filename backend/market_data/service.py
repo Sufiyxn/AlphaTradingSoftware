@@ -12,6 +12,25 @@ class MarketDataService:
     def __init__(self, provider: MarketDataProvider):
         self._provider = provider
 
+    @property
+    def configured(self) -> bool:
+        return bool(getattr(self._provider, "is_configured", True))
+
+    @property
+    def provider_id(self) -> str:
+        return str(getattr(self._provider, "provider", "unknown")).strip().lower()
+
+    @property
+    def status(self) -> dict:
+        """Honest provider state; NOT_CONFIGURED when nothing real is connected."""
+        if self.configured:
+            return {"state": "CONFIGURED", "provider": self.provider_id, "reason": None}
+        return {
+            "state": "NOT_CONFIGURED",
+            "provider": self.provider_id,
+            "reason": str(getattr(self._provider, "reason", None) or "no market data provider is connected"),
+        }
+
     def get_historical(self, symbol: str, start: datetime, end: datetime) -> tuple[Bar, ...]:
         if start.tzinfo is None or start.utcoffset() is None or end.tzinfo is None or end.utcoffset() is None:
             raise DataValidationError("start and end must include a timezone")

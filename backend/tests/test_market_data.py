@@ -9,7 +9,7 @@ from backend.market_data import (
     Quote,
     normalize_bar,
 )
-from backend.market_data.mock_provider import MockMarketDataProvider
+from backend.testing import MockMarketDataProvider
 
 
 START = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)

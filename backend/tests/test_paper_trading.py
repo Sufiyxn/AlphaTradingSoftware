@@ -24,6 +24,15 @@ def paper(*, execution=None, config=None, risk=None):
     return engine, portfolio
 
 
+def mark(portfolio, symbol, price=100.0, timestamp=NOW):
+    """Simulate a connected provider delivering a real quote for the position.
+
+    Automatic stop-loss/take-profit is gated on a FRESH real mark, so a test
+    that wants an exit must first supply one - exactly like production.
+    """
+    portfolio.update_price(symbol, price, timestamp=timestamp)
+
+
 class PaperTradingTests(unittest.TestCase):
     def test_long_fill_and_target_exit(self):
         engine, portfolio = paper(config=PaperTradingConfig(commission_per_share=.01, slippage_per_share=.1))
@@ -31,6 +40,7 @@ class PaperTradingTests(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertEqual(result.order.status, OrderStatus.FILLED)
         self.assertGreater(result.trade.entry_price, 100)
+        mark(portfolio, "ABC")
         closed = engine.on_bar("ABC", NOW, 111, 99)
         self.assertEqual(len(closed), 1)
         self.assertEqual(portfolio.snapshot().positions, ())
@@ -39,6 +49,7 @@ class PaperTradingTests(unittest.TestCase):
     def test_stop_exit_and_same_bar_stop_first(self):
         engine, portfolio = paper()
         engine.submit(setup())
+        mark(portfolio, "ABC")
         engine.on_bar("ABC", NOW, 111, 94)
         self.assertLess(portfolio.snapshot().realized_pnl, -1000)
 
@@ -46,6 +57,7 @@ class PaperTradingTests(unittest.TestCase):
         engine, portfolio = paper()
         result = engine.submit(setup("SHORT", Direction.SHORT))
         self.assertTrue(result.accepted)
+        mark(portfolio, "SHORT")
         engine.on_bar("SHORT", NOW, 100, 89)
         self.assertGreater(portfolio.snapshot().realized_pnl, 0)
 
@@ -81,7 +93,16 @@ class PaperTradingTests(unittest.TestCase):
     def test_open_position_does_not_close_when_levels_untouched(self):
         engine, portfolio = paper()
         engine.submit(setup())
+        mark(portfolio, "ABC")
         self.assertEqual(engine.on_bar("ABC", NOW, 104, 96), ())
+        self.assertEqual(len(portfolio.positions), 1)
+
+    def test_unpriced_position_is_never_exited_automatically(self):
+        engine, portfolio = paper()
+        engine.submit(setup())
+        self.assertIsNone(portfolio.positions[0].market_price)
+        self.assertEqual(engine.on_bar("ABC", NOW, 0.01, 0.01), ())
+        self.assertEqual(engine.on_quote("ABC", NOW, 0.01), ())
         self.assertEqual(len(portfolio.positions), 1)
 
     def test_paper_trading_operates_through_universal_router(self):

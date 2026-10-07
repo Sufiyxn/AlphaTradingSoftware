@@ -4,6 +4,7 @@ from .analysis import AnalysisContext, PerSymbolAnalyzer, TemporaryTestAnalyzer
 from .models import Direction, Opportunity, SymbolResult
 from .ranking import filter_and_rank
 from .service import MarketScanner, MarketScannerService
+from .strategy_analyzer import StrategyAnalyzer
 from .universe import SymbolUniverse
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "MarketScannerService",
     "Opportunity",
     "PerSymbolAnalyzer",
+    "StrategyAnalyzer",
     "SymbolResult",
     "SymbolUniverse",
     "TemporaryTestAnalyzer",

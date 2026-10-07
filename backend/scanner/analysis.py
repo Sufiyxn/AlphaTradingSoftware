@@ -21,7 +21,11 @@ class PerSymbolAnalyzer(Protocol):
 
 
 class TemporaryTestAnalyzer:
-    """Temporary deterministic pipeline fixture; not a trading strategy."""
+    """Deterministic pipeline fixture for automated tests only.
+
+    ``ApplicationRuntime`` wires :class:`backend.scanner.StrategyAnalyzer`
+    instead; this fixture is never part of the production service graph.
+    """
 
     def __init__(self, minimum_reward_risk: float = 2.0):
         self.minimum_reward_risk = minimum_reward_risk

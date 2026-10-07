@@ -1,54 +1,87 @@
-"""Local paper-only service composition for the Alpha Trading Platform."""
+"""Production service composition for the Alpha Trading Platform.
+
+Every dependency is either real and configured, or explicitly NOT_CONFIGURED.
+This module constructs no synthetic market data, no demo history, no fabricated
+account, and no test fixture; fixtures are injected by tests through
+``market_data_provider`` only.
+"""
 import logging
-import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.admin import LocalOwnerAuthenticator, OwnerControlPlane
-from backend.ai import AIAnalysisService, MockAIAnalysisProvider
-from .connections import ConnectionCenter
+from backend.ai import AIAnalysisService, LocalRuleBasedAnalysisProvider
+from backend.config import Config, load_config
 from backend.database import SQLiteJournalRepository
-from backend.execution import AdapterRegistry, ExecutionRouter, MockTradingPlatformAdapter
-from backend.market_data import MarketDataService
-from backend.market_data.mock_provider import MockMarketDataProvider
+from backend.execution import AdapterRegistry, ExecutionRouter, LocalPaperAdapter
+from backend.market_data import MarketDataBridge, MarketDataService, build_market_data_provider
 from backend.market_data.session import NEW_YORK, market_session
 from backend.orchestrator import OrchestratorConfig, TradingOrchestrator
-from backend.paper_trading import PaperTradingEngine
+from backend.paper_trading import PaperTradingEngine, PositionValuationService, reconcile_journal
 from backend.portfolio import Portfolio
 from backend.reporting import DailyReportingService, LocalMockNotifier, LogExportService, PerformanceService
-from backend.risk import RiskConfig, RiskEngine
-from backend.scanner import MarketScannerService, SymbolUniverse, TemporaryTestAnalyzer
+from backend.risk import RiskEngine
+from backend.scanner import MarketScannerService, StrategyAnalyzer, SymbolUniverse
 from backend.strategies import StrategyEngine
+
+from .connections import ConnectionCenter
 
 
 class ApplicationRuntime:
-    """Owns the local service graph; execution is restricted to a mock adapter."""
+    """Owns the production service graph; nothing synthetic is wired here."""
 
     def __init__(self, *, database_path: str | Path = "data/alpha_trading.sqlite3",
-                 owner_token: str | None = None, clock=lambda: datetime.now(timezone.utc)):
-        self.clock = clock
+                 owner_token: str | None = None, clock=None,
+                 config: Config | None = None, market_data_provider=None):
+        self.config = config if config is not None else load_config()
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        trading = self.config.trading
+
         self.repository = SQLiteJournalRepository(database_path)
-        self.market_data_provider = MockMarketDataProvider(demo_history=True)
+        self.market_data_provider = (
+            market_data_provider if market_data_provider is not None
+            else build_market_data_provider(self.config.market_data))
         self.market_data = MarketDataService(self.market_data_provider)
-        self.portfolio = Portfolio(100_000.0)
-        self.risk = RiskEngine(RiskConfig())
+        self.market_data_bridge = MarketDataBridge(
+            self.market_data, clock=self.clock,
+            stale_after_seconds=self.config.market_data.stale_after_seconds)
+
+        self.portfolio = Portfolio(trading.paper_starting_cash, clock=self.clock)
+        self.risk = RiskEngine(self.config.risk)
+
         self.registry = AdapterRegistry()
-        self.registry.register(MockTradingPlatformAdapter(cash=100_000.0, clock=clock), "mock")
-        self.execution = ExecutionRouter(self.registry, "mock", clock=clock)
-        self.paper = PaperTradingEngine(self.risk, self.portfolio, self.execution, journal=self.repository)
+        self.paper_adapter = LocalPaperAdapter(cash=trading.paper_starting_cash, clock=self.clock)
+        self.registry.register(self.paper_adapter, self.paper_adapter.identify())
+        self.execution = ExecutionRouter(self.registry, self.paper_adapter.identify(), clock=self.clock)
+        self.paper = PaperTradingEngine(self.risk, self.portfolio, self.execution,
+                                        journal=self.repository, clock=self.clock)
+        self.valuation = PositionValuationService(
+            self.market_data_bridge, self.portfolio, self.paper, journal=self.repository)
+        self.reconciliation = reconcile_journal(
+            portfolio=self.portfolio, engine=self.paper, repository=self.repository,
+            starting_cash=trading.paper_starting_cash, clock=self.clock)
+
+        self.strategy = StrategyEngine(config=self.config.strategy)
         self.scanner = MarketScannerService(
-            self.market_data, TemporaryTestAnalyzer(), clock=lambda: datetime(2024, 1, 2, 15, 29, 0, 1, timezone.utc),
+            self.market_data,
+            StrategyAnalyzer(self.strategy, minimum_reward_risk=self.config.strategy.min_reward_risk),
+            lookback=timedelta(days=trading.history_lookback_days),
+            minimum_reward_risk=self.config.strategy.min_reward_risk,
+            clock=self.clock,
         )
-        self.strategy = StrategyEngine()
-        ai_enabled = os.getenv("AI_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
-        local_ai = os.getenv("AI_PROVIDER", "LOCAL/MOCK").upper() in ("MOCK", "LOCAL/MOCK")
         self.orchestrator = TradingOrchestrator(
             market_data=self.market_data, scanner=self.scanner, strategy=self.strategy,
             risk_engine=self.risk, paper_trading=self.paper, portfolio=self.portfolio,
-            config=OrchestratorConfig(SymbolUniverse(("F", "SOFI", "PLTR", "AAPL", "BAC"))),
-            clock=clock,
-            ai_analysis=AIAnalysisService(MockAIAnalysisProvider()) if ai_enabled and local_ai else None,
+            config=OrchestratorConfig(
+                SymbolUniverse(trading.universe),
+                scan_interval=timedelta(seconds=trading.scan_interval_seconds),
+                history_lookback=timedelta(days=trading.history_lookback_days),
+                max_candidate_price=trading.max_candidate_price,
+            ),
+            clock=self.clock,
+            ai_analysis=(AIAnalysisService(LocalRuleBasedAnalysisProvider())
+                         if self.config.ai.active and self.config.ai.provider == "local" else None),
             journal=self.repository,
         )
         self.performance = PerformanceService(self.repository)
@@ -61,36 +94,85 @@ class ApplicationRuntime:
                 LocalOwnerAuthenticator(owner_token), self.orchestrator, self.repository,
             )
         self.connections = ConnectionCenter(
-            market_data=self.market_data, universe=self.orchestrator.config.universe,
+            config=self.config, market_data=self.market_data,
+            universe=self.orchestrator.config.universe,
             execution=self.execution, performance=self.performance, portfolio=self.portfolio,
             risk=self.risk, notifier=self.notifier,
-            owner_controls_enabled=self.owner_controls is not None, clock=clock,
-            repository=self.repository,
+            owner_controls_enabled=self.owner_controls is not None, clock=self.clock,
+            repository=self.repository, market_data_availability=self.valuation.availability,
         )
         self._report_stop = threading.Event()
         self._report_thread = threading.Thread(target=self._schedule_reports, name="alpha-daily-report", daemon=True)
         self._report_thread.start()
+        self._market_stop = threading.Event()
+        self._market_thread = threading.Thread(target=self._refresh_market_loop,
+                                               name="alpha-market-valuation", daemon=True)
+        self._market_thread.start()
+        # Establish honest availability and marks from the first request onward.
+        try:
+            self.refresh_market()
+        except Exception:
+            logging.getLogger(__name__).exception("Initial market-data valuation failed")
+
+    @property
+    def mode(self) -> str:
+        return self.config.trading.selection.effective.value
+
+    def refresh_market(self, symbols=None):
+        """Fetch real quotes, mark open positions, and evaluate automatic exits."""
+        if symbols is None:
+            symbols = tuple(dict.fromkeys([
+                *self.orchestrator.config.universe.symbols,
+                *(position.symbol for position in self.portfolio.positions)]))
+        return self.valuation.refresh(symbols)
 
     def status(self) -> dict:
         state = self.orchestrator.state
+        market = self.market_data.status
+        availability = self.valuation.availability()
+        snapshot = self.portfolio.snapshot()
         return {
-            "service": "alpha-trading-platform", "status": "ok", "mode": "PAPER",
-            "market_data_provider": "mock", "execution_adapter": self.execution.identify(),
-            "readiness": "LOCKED",
+            "service": "alpha-trading-platform", "status": "ok",
+            "mode": self.mode,
+            "mode_selection": {
+                "configured": self.config.trading.mode.value,
+                "effective": self.mode,
+                "live_intent": self.config.trading.selection.live_intent,
+            },
+            "market_data_provider": market["provider"],
+            "market_data_state": market["state"],
+            "market_data_reason": market["reason"],
+            "market_data_availability": availability["state"],
+            "market_data_availability_reason": availability["reason"],
+            "market_data_last_quote_at": availability["last_quote_at"],
+            "market_data_stale_after_seconds": availability["stale_after_seconds"],
+            "valuation_status": snapshot.valuation_status,
+            "execution_adapter": self.execution.identify(),
+            "readiness": self.connections.readiness()["status"],
             "market_session": market_session(self.clock()).state,
             "market_trading_day": market_session(self.clock()).is_trading_day,
             "report_notification": "local-only",
             "owner_controls_enabled": self.owner_controls is not None,
-            "orchestrator": state, "portfolio": self.portfolio.snapshot(),
+            "orchestrator": state, "portfolio": snapshot,
             "risk_kill_switch": self.risk.kill_switch_enabled,
             "universe": self.orchestrator.config.universe.symbols,
         }
 
     def close(self) -> None:
         self._report_stop.set()
+        self._market_stop.set()
         self.orchestrator.stop()
         self._report_thread.join(timeout=1)
+        self._market_thread.join(timeout=1)
         self.repository.close()
+
+    def _refresh_market_loop(self) -> None:
+        interval = self.config.trading.scan_interval_seconds
+        while not self._market_stop.wait(interval):
+            try:
+                self.refresh_market()
+            except Exception:
+                logging.getLogger(__name__).exception("Scheduled market-data valuation failed")
 
     def _schedule_reports(self) -> None:
         sent: set[object] = set()
@@ -101,7 +183,7 @@ class ApplicationRuntime:
                 try:
                     self.daily_reports.generate_on_demand(
                         session.trading_date, self.portfolio.snapshot(), system_health="OK",
-                        notify=os.getenv("NOTIFICATION_ENABLED", "true").lower() in ("1", "true", "yes", "on"),
+                        notify=self.config.notifications.enabled,
                     )
                     sent.add(session.trading_date)
                 except Exception as error:

@@ -1,5 +1,9 @@
-"""Redacted external-service configuration and deliberately local-only checks."""
-import os
+"""Redacted external-service configuration and deliberately local-only checks.
+
+Every value here comes from the injected configuration object. There are no
+environment fallbacks, no "MOCK means configured" branches, and no check that
+reports PASSED for something that is not actually connected.
+"""
 from datetime import datetime
 
 from backend.market_data.session import market_session
@@ -8,8 +12,10 @@ from backend.market_data.session import market_session
 class ConnectionCenter:
     SECTIONS = {"market_data", "trading_platform", "ai", "notifications", "tradingview"}
 
-    def __init__(self, *, market_data, universe, execution, performance, portfolio, risk,
-                 notifier, owner_controls_enabled, clock, repository=None):
+    def __init__(self, *, config, market_data, universe, execution, performance, portfolio,
+                 risk, notifier, owner_controls_enabled, clock, repository=None,
+                 market_data_availability=None):
+        self.config = config
         self.market_data = market_data
         self.universe = universe
         self.execution = execution
@@ -20,6 +26,7 @@ class ConnectionCenter:
         self.owner_controls_enabled = owner_controls_enabled
         self.clock = clock
         self.repository = repository
+        self._availability_source = market_data_availability
         self.last_tests: dict[str, dict] = {}
         self.last_successful: dict[str, datetime] = {}
         if repository is not None:
@@ -37,107 +44,166 @@ class ConnectionCenter:
                     self.last_successful[section] = datetime.fromisoformat(successful_at) if isinstance(successful_at, str) else successful_at
 
     def status(self) -> dict:
-        env = os.environ
-        data_provider = env.get("MARKET_DATA_PROVIDER", "MOCK").upper()
-        data_mode = env.get("MARKET_DATA_MODE", "MOCK").upper()
-        platform_adapter = env.get("TRADING_PLATFORM_ADAPTER", "mock").strip()
-        platform_mode = env.get("TRADING_PLATFORM_ENVIRONMENT", "PAPER").upper()
-        ai_provider = env.get("AI_PROVIDER", "LOCAL/MOCK")
-        ai_enabled = _enabled(env.get("AI_ENABLED"), default=True)
-        notification_provider = env.get("NOTIFICATION_PROVIDER", "LOCAL/MOCK")
-        notification_enabled = _enabled(env.get("NOTIFICATION_ENABLED"), default=True)
-        tv_enabled = _enabled(env.get("TRADINGVIEW_ENABLED"), default=False)
-        caps = self.execution.capabilities()
+        market = self.config.market_data.describe()
+        broker = self.config.broker.describe()
+        ai = self.config.ai.describe()
+        notifications = self.config.notifications.describe()
+        tradingview = self.config.tradingview.describe()
+        provider_state = self.market_data.status
         return {
             "market_data": {
-                "provider": data_provider, "mode": data_mode,
-                "configured": data_provider == "MOCK" or _all_present(env, "MARKET_DATA_API_KEY"),
-                "base_url_configured": bool(env.get("MARKET_DATA_BASE_URL")),
-                "plan_configured": bool(env.get("MARKET_DATA_PLAN")),
-                "account_id_configured": bool(env.get("MARKET_DATA_ACCOUNT_ID")),
-                "capabilities": ["historical_ohlcv", "latest_quotes", "multiple_symbols", "read_only"],
+                "provider": market["provider"], "label": market["label"],
+                "mode": market["state"],
+                "known": market["known"], "implemented": market["implemented"],
+                "configured": market["configured"], "available": market["available"],
+                "state": market["state"], "reason": market["reason"],
+                "missing_credentials": market["missing_credentials"],
+                "base_url_configured": market["base_url_configured"],
+                "plan_configured": market["plan_configured"],
+                "account_id_configured": market["account_id_configured"],
+                "capabilities": market["capabilities"],
+                "live_provider": provider_state,
                 "connection": self.last_tests.get("market_data", _never_tested()),
                 "last_successful_connection": self.last_successful.get("market_data"),
             },
             "trading_platform": {
-                "name": env.get("TRADING_PLATFORM_NAME", "Local mock platform"),
-                "adapter": platform_adapter, "environment": platform_mode,
-                "configured": platform_adapter.lower() == "mock" or _all_present(
-                    env, "TRADING_PLATFORM_API_KEY", "TRADING_PLATFORM_API_SECRET", "TRADING_PLATFORM_ACCOUNT_ID"),
-                "base_url_configured": bool(env.get("TRADING_PLATFORM_BASE_URL")),
-                "account_id_configured": bool(env.get("TRADING_PLATFORM_ACCOUNT_ID")),
-                "capabilities": caps,
+                "name": broker["label"] if broker["known"] else "Not connected",
+                "label": broker["label"],
+                "adapter": broker["provider"], "environment": broker["environment"],
+                "known": broker["known"], "implemented": broker["implemented"],
+                "configured": broker["configured"], "available": broker["available"],
+                "state": broker["state"], "reason": broker["reason"],
+                "missing_credentials": broker["missing_credentials"],
+                "base_url_configured": broker["base_url_configured"],
+                "account_id_configured": broker["account_id_configured"],
+                "capabilities": self.execution.capabilities(),
                 "account_connection": self.last_tests.get("trading_platform", _never_tested()),
                 "last_successful_connection": self.last_successful.get("trading_platform"),
                 "live_execution_available": False,
             },
+            "paper_account": {
+                "execution": self.execution.identify(),
+                "mode": "SIMULATED",
+                "market_data_authority": "NONE",
+                "description": (
+                    "Paper mode simulates cash, fills, positions, and P&L only. "
+                    "Prices always come from a connected market-data provider or a "
+                    "TradingView signal; this account never generates a price."),
+            },
             "ai": {
-                "provider": ai_provider, "model": env.get("AI_MODEL", "local-deterministic"),
-                "endpoint_configured": bool(env.get("AI_BASE_URL")),
-                "configured": ai_provider.upper() in ("MOCK", "LOCAL/MOCK") or _all_present(env, "AI_API_KEY"),
-                "enabled": ai_enabled, "role": "ADVISORY_ONLY",
+                "provider": ai["provider"], "label": ai["label"], "model": ai["model"],
+                "known": ai["known"], "implemented": ai["implemented"],
+                "configured": ai["configured"], "available": ai.get("available"),
+                "active": ai["active"], "state": ai["state"], "reason": ai["reason"],
+                "missing_credentials": ai["missing_credentials"],
+                "endpoint_configured": ai["endpoint_configured"],
+                "enabled": ai["enabled"], "role": ai["role"], "authority": ai["authority"],
                 "connection": self.last_tests.get("ai", _never_tested()),
                 "last_successful_connection": self.last_successful.get("ai"),
             },
             "notifications": {
-                "provider": notification_provider,
-                "destination_configured": bool(env.get("NOTIFICATION_DESTINATION")),
-                "configured": notification_provider.upper() in ("MOCK", "LOCAL/MOCK") or _all_present(env, "NOTIFICATION_TOKEN"),
-                "enabled": notification_enabled,
+                "provider": notifications["provider"], "label": notifications["label"],
+                "enabled": notifications["enabled"],
+                "known": notifications["known"], "implemented": notifications["implemented"],
+                "configured": notifications["configured"],
+                "active_channels": notifications["active_channels"],
+                "destination_configured": any(
+                    channel["destination_configured"] for channel in notifications["channels"]),
                 "connection": self.last_tests.get("notifications", _never_tested()),
                 "last_successful_connection": self.last_successful.get("notifications"),
             },
             "tradingview": {
-                "enabled": tv_enabled, "webhook_available": False,
-                "secret_configured": bool(env.get("TRADINGVIEW_WEBHOOK_SECRET")),
-                "endpoint_status": "NOT_IMPLEMENTED", "last_received_signal": None,
+                **tradingview,
+                "webhook_available": False,
+                "endpoint_status": "NOT_IMPLEMENTED" if not tradingview["enabled"] else "NOT_INSTALLED",
+                "connection": self.last_tests.get("tradingview", _never_tested()),
+                "last_successful_connection": self.last_successful.get("tradingview"),
+                "last_received_signal": None,
             },
         }
+
+    def market_data_availability(self) -> dict:
+        """Five-state availability from the market-data bridge, honest about nothing."""
+        if self._availability_source is None:
+            return {"state": "NOT_CONFIGURED", "reason": "no market-data bridge is attached",
+                    "last_quote_at": None, "stale_after_seconds": None, "refreshed_at": self.clock()}
+        return self._availability_source()
 
     def test(self, section: str) -> dict:
         if section not in self.SECTIONS:
             raise ValueError("unsupported connection section")
         tested_at = self.clock()
-        local_data_mode = os.getenv("MARKET_DATA_MODE", "MOCK").upper()
-        if (section == "market_data" and os.getenv("MARKET_DATA_PROVIDER", "MOCK").upper() == "MOCK"
-                and local_data_mode in ("MOCK", "PAPER", "TEST")):
-            quotes = self.market_data.get_latest(self.universe.symbols)
-            result = _test_result(bool(quotes), tested_at,
-                                  "Local mock quotes are available" if quotes else "No mock quotes available")
-        elif (section == "trading_platform" and self.execution.identify().lower() == "mock"
-              and os.getenv("TRADING_PLATFORM_ENVIRONMENT", "PAPER").upper() == "PAPER"):
-            account = self.execution.get_account()
-            result = _test_result(account.equity > 0, tested_at,
-                                  "Local paper adapter account is available" if account.equity > 0 else "Paper account has no equity")
-        elif section == "ai" and os.getenv("AI_PROVIDER", "LOCAL/MOCK").upper() in ("MOCK", "LOCAL/MOCK"):
-            result = _test_result(True, tested_at, "Local advisory provider is available; it has no execution authority")
-        elif section == "notifications" and os.getenv("NOTIFICATION_PROVIDER", "LOCAL/MOCK").upper() in ("MOCK", "LOCAL/MOCK"):
-            result = _test_result(True, tested_at, "Local notification sink is available; no external message was sent")
+        market = self.config.market_data
+        broker = self.config.broker
+        if section == "market_data":
+            result = self._external_probe(
+                label="market data", provider=market.provider, configured=market.configured,
+                available=market.available, reason=market.unavailable_reason, tested_at=tested_at)
+        elif section == "trading_platform":
+            result = self._external_probe(
+                label="trading platform", provider=broker.provider, configured=broker.configured,
+                available=broker.available, reason=broker.unavailable_reason, tested_at=tested_at)
+            if result["status"] == "PASSED":
+                result["error"] = "No external broker adapter is installed; no network request was made"
+                result["success"] = False
+                result["status"] = "UNSUPPORTED"
+        elif section == "ai":
+            if self.config.ai.active:
+                result = _test_result(True, tested_at,
+                                      "Local advisory provider is available; it has no execution authority")
+            elif self.config.ai.provider == "none" or not self.config.ai.enabled:
+                result = _not_configured(tested_at, self.config.ai.reason or "AI analysis is not enabled")
+            else:
+                result = _unsupported(tested_at, f"the {self.config.ai.provider} AI adapter is not installed; "
+                                                 "no network request was made")
+        elif section == "notifications":
+            channel = self.config.notifications
+            if channel.active_channels:
+                names = ", ".join(item.provider for item in channel.active_channels)
+                result = _test_result(True, tested_at,
+                                      f"Local notification sink is active ({names}); no external message was sent")
+            else:
+                result = _not_configured(tested_at, "no notification channel is configured")
         elif section == "tradingview":
-            result = {"status": "UNSUPPORTED", "success": False, "tested_at": tested_at,
-                      "error": "TradingView webhook support is not implemented; no endpoint was opened"}
+            tv = self.config.tradingview
+            if not tv.enabled or not tv.configured:
+                result = _not_configured(tested_at, "TradingView webhook is not configured; "
+                                                    "set TRADINGVIEW_ENABLED and TRADINGVIEW_WEBHOOK_SECRET")
+            else:
+                result = _unsupported(tested_at, "the TradingView webhook endpoint is not installed; "
+                                                 "no endpoint was opened")
         else:
-            result = {"status": "UNSUPPORTED", "success": False, "tested_at": tested_at,
-                      "error": "No external adapter is installed; no network request was made"}
+            result = _unsupported(tested_at, "No external adapter is installed; no network request was made")
         self.last_tests[section] = result
         if result.get("success"):
             self.last_successful[section] = tested_at
         result["last_successful_at"] = self.last_successful.get(section)
         return result
 
+    @staticmethod
+    def _external_probe(*, label, provider, configured, available, reason, tested_at) -> dict:
+        detail = reason or f"no {label} provider is connected"
+        if not configured or provider in ("", "none"):
+            return _not_configured(tested_at, f"{detail}; no network request was made")
+        if not available:
+            return _unsupported(tested_at, f"{detail}; no network request was made")
+        return _unsupported(tested_at, f"the {provider} {label} adapter is installed but has no probe yet; "
+                                       "no network request was made")
+
     def readiness(self) -> dict:
         configured = self.status()
+        availability = self.market_data_availability()
         performance = self.performance.calculate(
             as_of=market_session(self.clock()).trading_date, portfolio=self.portfolio.snapshot())
         data_test = self.last_tests.get("market_data", {}).get("success", False)
         broker_test = self.last_tests.get("trading_platform", {}).get("success", False)
-        market_is_external = configured["market_data"]["provider"] != "MOCK"
-        broker_is_external = configured["trading_platform"]["adapter"].lower() != "mock"
+        market_ready = configured["market_data"]["available"]
+        broker_ready = configured["trading_platform"]["available"]
         checks = [
-            _check("market_data_configured", "External market data configured", market_is_external and configured["market_data"]["configured"]),
-            _check("market_data_test_passed", "Market data connection tested", market_is_external and data_test),
-            _check("broker_configured", "Platform credentials configured", broker_is_external and configured["trading_platform"]["configured"]),
-            _check("broker_connection_tested", "Platform connection tested", broker_is_external and broker_test),
+            _check("market_data_configured", "External market data configured", market_ready),
+            _check("market_data_test_passed", "Market data connection tested", market_ready and data_test),
+            _check("broker_configured", "Platform credentials configured", broker_ready),
+            _check("broker_connection_tested", "Platform connection tested", broker_ready and broker_test),
             _check("account_available", "Live account available", False),
             _check("capabilities_supported", "Required live capabilities supported", False),
             _check("owner_authentication", "Owner authentication active", self.owner_controls_enabled),
@@ -151,24 +217,27 @@ class ConnectionCenter:
             {"key": "live_mode", "label": "Live trading", "status": "LOCKED", "passed": False,
              "detail": "Live execution is not implemented; credentials cannot unlock this mode."},
         ]
+        not_configured = [
+            item["label"] for item in checks if not item["passed"]
+            and item["key"] in ("market_data_configured", "market_data_test_passed",
+                                "broker_configured", "broker_connection_tested")
+        ]
         return {"status": "LOCKED", "live_mode": "LOCKED", "checks": checks,
+                "market_data_state": configured["market_data"]["state"],
+                "market_data_reason": configured["market_data"]["reason"],
+                "market_data_availability": availability["state"],
+                "market_data_availability_reason": availability["reason"],
+                "market_data_last_quote_at": availability.get("last_quote_at"),
+                "broker_state": configured["trading_platform"]["state"],
+                "broker_reason": configured["trading_platform"]["reason"],
+                "not_configured": not_configured,
                 "performance_qualification": performance.qualification_status,
                 "measured_win_rate": performance.evaluation_win_rate,
                 "evaluation_trades": performance.evaluation_trades,
                 "paper_mode": "ACTIVE", "blockers": [item["label"] for item in checks if not item["passed"]]}
 
     def _max_entry(self) -> float:
-        return 100.0
-
-
-def _enabled(value: str | None, *, default: bool) -> bool:
-    if value is None:
-        return default
-    return value.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _all_present(env, *keys: str) -> bool:
-    return all(bool(env.get(key)) for key in keys)
+        return self.config.trading.max_candidate_price
 
 
 def _never_tested() -> dict:
@@ -179,6 +248,16 @@ def _never_tested() -> dict:
 def _test_result(success: bool, tested_at: datetime, message: str) -> dict:
     return {"status": "PASSED" if success else "FAILED", "success": success,
             "tested_at": tested_at, "error": None if success else message, "message": message}
+
+
+def _not_configured(tested_at: datetime, reason: str) -> dict:
+    return {"status": "NOT_CONFIGURED", "success": False, "tested_at": tested_at,
+            "error": reason, "message": reason}
+
+
+def _unsupported(tested_at: datetime, reason: str) -> dict:
+    return {"status": "UNSUPPORTED", "success": False, "tested_at": tested_at,
+            "error": reason, "message": reason}
 
 
 def _check(key: str, label: str, passed: bool) -> dict:

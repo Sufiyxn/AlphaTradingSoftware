@@ -18,7 +18,7 @@ class PortfolioTests(unittest.TestCase):
         self.assertEqual(position.average_entry_price, 105)
         self.assertEqual(portfolio.snapshot().cash, 7_900)
 
-        portfolio.update_price("ABC", 115)
+        portfolio.update_price("ABC", 115, timestamp=NOW)
         snapshot = portfolio.snapshot()
         self.assertEqual(snapshot.unrealized_pnl, 200)
         self.assertEqual(snapshot.exposure, 2_300)

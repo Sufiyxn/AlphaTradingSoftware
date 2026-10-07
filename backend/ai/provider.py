@@ -8,8 +8,12 @@ from .interface import AIAnalysisProvider
 from .models import AIRecommendation, SetupAnalysis
 
 
-class MockAIAnalysisProvider:
-    """Local deterministic setup reviewer; requires no API key or network."""
+class LocalRuleBasedAnalysisProvider:
+    """In-process, keyless setup reviewer used when AI_PROVIDER=local.
+
+    It only re-reads the setup it is given; it never fetches, infers, or
+    invents a market price. Advisory only - it has no execution authority.
+    """
 
     def analyze(self, setup: TradeSetup, market_context: Sequence[Bar] = ()) -> SetupAnalysis:
         ratio = setup.reward_risk_ratio
@@ -26,3 +30,6 @@ class MockAIAnalysisProvider:
 
 
 AIProvider = AIAnalysisProvider
+
+# Legacy name kept so existing tests and callers continue to resolve.
+MockAIAnalysisProvider = LocalRuleBasedAnalysisProvider

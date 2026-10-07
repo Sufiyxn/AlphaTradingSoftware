@@ -10,7 +10,15 @@ from .models import AccountSnapshot, AssetType, Balance, Fill, Order, OrderReque
 
 
 class MockTradingPlatformAdapter:
-    """Deterministic local adapter with no network, credentials, or venue access."""
+    """Deterministic test fixture with no network, credentials, or venue access.
+
+    Automated tests only. The product wires :class:`LocalPaperAdapter` instead;
+    nothing under ``ApplicationRuntime`` ever constructs this class.
+    """
+
+    identify_name = "mock"
+    order_prefix = "MOCK"
+    account_id = "mock-account"
 
     def __init__(self, *, cash: float = 100_000.0, partial_fill_quantity: int | None = None,
                  fail_orders: bool = False, clock=lambda: datetime(2000, 1, 1, tzinfo=timezone.utc),
@@ -29,7 +37,7 @@ class MockTradingPlatformAdapter:
         self._connected = True
 
     def identify(self) -> str:
-        return "mock"
+        return self.identify_name
 
     def capabilities(self) -> PlatformCapabilities:
         return self._capabilities
@@ -44,10 +52,11 @@ class MockTradingPlatformAdapter:
         self._connected = False
 
     def get_account(self) -> AccountSnapshot:
-        return AccountSnapshot(self.cash, self.cash, "USD", "mock-account", (Balance("USD", self.cash, self.cash, self.cash),))
+        return AccountSnapshot(self.cash, self.cash, "USD", self.account_id,
+                               (Balance("USD", self.cash, self.cash, self.cash),))
 
     def place_order(self, request: OrderRequest) -> Order:
-        order_id = f"MOCK-{self._next_id:06d}"
+        order_id = f"{self.order_prefix}-{self._next_id:06d}"
         self._next_id += 1
         filled = 0 if self.fail_orders else min(request.quantity, self.partial_fill_quantity or request.quantity)
         status = OrderStatus.REJECTED if self.fail_orders else (
