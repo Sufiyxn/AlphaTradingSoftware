@@ -54,6 +54,13 @@ class RiskEngine:
     7. final invariant checks against the resulting quantity: total trade
        risk, max quantity, position notional, projected portfolio exposure
 
+    Submitted-but-unfilled orders are carried on the snapshot as
+    ``pending_reservations`` and are honoured by steps 5, 6 and 7: they hold a
+    position slot, they close the duplicate-symbol door, and their remaining
+    notional is subtracted from exposure room, cash and the symbol's room.
+    Because only the *unfilled* remainder is reserved, a partial fill never
+    counts twice - the filled part is already a position.
+
     Nothing here fabricates a price, an account balance, or P&L: every number
     comes from the caller's trade setup or the canonical portfolio snapshot.
     When a required value is invalid, the trade is rejected - a missing price
@@ -147,9 +154,13 @@ class RiskEngine:
         equity = float(portfolio.equity)
         exposure = float(portfolio.exposure)
         daily_pnl = float(portfolio.daily_pnl)
+        pending = tuple(getattr(portfolio, "pending_reservations", ()) or ())
+        pending_notional = sum(item.notional for item in pending)
+        pending_symbols = {item.symbol for item in pending}
+        held_symbols = {position.symbol for position in portfolio.positions}
+        reserved_slots = len(pending_symbols - held_symbols)
         symbol = str(setup.symbol).strip().upper() if valid_setup else ""
-        symbol_open = bool(symbol) and any(
-            position.symbol == symbol for position in portfolio.positions)
+        symbol_open = bool(symbol) and (symbol in held_symbols or symbol in pending_symbols)
 
         if config.require_fresh_valuation:
             unfresh = [position.symbol for position in portfolio.positions
@@ -162,7 +173,10 @@ class RiskEngine:
             reject(RiskCode.INVALID_EQUITY, "portfolio equity is not positive")
         elif daily_pnl <= -equity * config.max_daily_loss_fraction:
             reject(RiskCode.DAILY_LOSS_LIMIT, "maximum daily loss reached")
-        if len(portfolio.positions) >= config.max_simultaneous_positions:
+        # A submitted-but-unfilled order counts toward the position slot it
+        # will occupy the moment it fills; a symbol that already holds a
+        # position does not consume a second slot for its own pending order.
+        if len(portfolio.positions) + reserved_slots >= config.max_simultaneous_positions:
             reject(RiskCode.MAX_POSITIONS_REACHED, "maximum simultaneous positions reached")
         if not config.allow_duplicate_symbol and symbol_open:
             reject(RiskCode.DUPLICATE_SYMBOL, "duplicate symbol position prohibited")
@@ -194,11 +208,13 @@ class RiskEngine:
 
         trade_risk = risk_per_unit * quantity if quantity > 0 else 0.0
         notional = float(entry) * quantity if quantity > 0 and prices_valid else 0.0
-        projected = exposure + notional
+        projected = exposure + pending_notional + notional
         symbol_held = sum(
             position.quantity * (
                 position.average_entry_price if position.market_price is None else position.market_price)
             for position in portfolio.positions if symbol and position.symbol == symbol)
+        pending_symbol_notional = sum(
+            item.notional for item in pending if symbol and item.symbol == symbol)
 
         # 7. final invariant checks against the resulting quantity ----------------
         if config.max_risk_amount is not None and trade_risk > config.max_risk_amount:
@@ -216,7 +232,7 @@ class RiskEngine:
                    f"{config.max_quantity} shares")
         if notional > config.max_position_notional:
             reject(RiskCode.POSITION_NOTIONAL_EXCEEDED, "maximum position size exceeded")
-        if symbol_held + notional > config.max_symbol_exposure:
+        if symbol_held + pending_symbol_notional + notional > config.max_symbol_exposure:
             reject(RiskCode.SYMBOL_EXPOSURE_EXCEEDED,
                    "symbol exposure would exceed the configured maximum")
         if projected > equity * config.max_portfolio_exposure_fraction:
@@ -252,5 +268,6 @@ class RiskEngine:
             daily_pnl=daily_pnl,
             equity=equity,
             symbol_open=symbol_open,
+            pending_exposure=pending_notional,
             limits=config.limits,
             decided_at=self._clock())

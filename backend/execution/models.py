@@ -10,8 +10,15 @@ from backend.strategies.models import Direction
 class OrderStatus(str, Enum):
     """Normalized order state. Provider words are mapped by
     :func:`normalize_order_status`; anything unrecognized becomes ``UNKNOWN``
-    instead of an invented status."""
+    instead of an invented status.
 
+    ``NEW`` is the platform's own pre-submission state - an order the platform
+    created but has not yet handed to a provider. Providers never report it, so
+    :func:`normalize_order_status` never produces it; a provider word that is
+    not recognised becomes ``UNKNOWN`` rather than a guess.
+    """
+
+    NEW = "NEW"
     PENDING = "PENDING"
     SUBMITTED = "SUBMITTED"
     ACCEPTED = "ACCEPTED"
@@ -164,10 +171,25 @@ class OrderRequest:
 
 @dataclass(frozen=True, slots=True)
 class Fill:
+    """One executed quantity at one price.
+
+    ``fill_id`` is the platform's own identity for the fill and is assigned
+    when the canonical order lifecycle records it; ``provider_fill_id`` is the
+    execution venue's identifier and stays ``None`` when the provider does not
+    expose one. ``order_id``/``provider_order_id`` tie the fill back to the
+    order it belongs to. A fill is only ever created from an execution the
+    provider actually reported - submitting an order never mints a fill.
+    """
+
     quantity: float
     price: float
     timestamp: datetime
     fee: float = 0.0
+    order_id: str | None = None
+    fill_id: str | None = None
+    provider_fill_id: str | None = None
+    provider_order_id: str | None = None
+    side: Direction | None = None
 
 
 @dataclass(frozen=True, slots=True)

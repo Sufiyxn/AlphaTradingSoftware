@@ -65,6 +65,36 @@ class Position:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingOrderReservation:
+    """Risk-layer view of an order that has been submitted but not (fully) filled.
+
+    A pending order is **not** a position: no fill has happened yet, so nothing
+    is booked. It does, however, commit capital the moment it fills, so the
+    risk layer reserves capacity for its *remaining* quantity to stop several
+    open orders from slipping past the exposure, position, duplicate-symbol,
+    and cash limits.
+
+    ``reference_price`` is the price the order itself carries (its limit/stop
+    price) - a real order attribute, never a market quote. When an order
+    carries no price at all the reservation contributes no notional (the
+    platform will not invent one) but still reserves duplicate-symbol and
+    max-position capacity.
+    """
+
+    order_id: str
+    symbol: str
+    direction: Direction
+    remaining_quantity: float
+    reference_price: float
+
+    @property
+    def notional(self) -> float:
+        if self.remaining_quantity <= 0 or self.reference_price <= 0:
+            return 0.0
+        return float(self.remaining_quantity) * float(self.reference_price)
+
+
+@dataclass(frozen=True, slots=True)
 class PortfolioSnapshot:
     cash: float
     equity: float
@@ -78,3 +108,13 @@ class PortfolioSnapshot:
     valuation_status: str = "COMPLETE"
     priced_position_count: int = 0
     unpriced_position_count: int = 0
+    #: Open-order commitments the risk layer must reserve capacity for. The
+    #: :class:`backend.portfolio.service.Portfolio` never populates this: the
+    #: canonical pipeline attaches it from the order store before risk runs,
+    #: so a snapshot handed straight to ``RiskEngine`` in a test carries none.
+    pending_reservations: tuple[PendingOrderReservation, ...] = ()
+
+    @property
+    def pending_notional(self) -> float:
+        """Committed capital of every not-yet-filled order, never a position."""
+        return sum(item.notional for item in self.pending_reservations)

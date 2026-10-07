@@ -27,6 +27,7 @@ from backend.execution import (
     ExecutionMode,
     ExecutionSafetyGate,
     MockTradingPlatformAdapter,
+    OrderStatus,
     OrderType,
     PlatformCapabilities,
 )
@@ -371,9 +372,24 @@ class RejectionCodeTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("did not fill", result.reason)
 
+    def test_an_accepted_but_unfilled_order_is_submitted_not_rejected(self):
+        from backend.testing.execution import ScriptedAdapter
+        adapter = ScriptedAdapter(authenticated=True, clock=CLOCK)
+        pipeline, _, _, _, _ = make_pipeline(adapter=adapter)
+        result = pipeline.execute(make_intent())
+        self.assertEqual(result.code, PipelineCode.SUBMITTED)
+        self.assertIsNotNone(result.order)
+        self.assertFalse(result.accepted, "nothing is booked until a fill exists")
+        self.assertEqual(result.order.status, OrderStatus.SUBMITTED)
+        self.assertEqual(result.order.filled_quantity, 0)
+        self.assertEqual(result.order.symbol, "ABC")
+        self.assertIsNotNone(result.order.provider_order_id)
+        self.assertIn("not filled", result.reason)
+
     def test_every_documented_code_is_exercised(self):
         exercised = {
-            PipelineCode.ACCEPTED, PipelineCode.INVALID_REQUEST,
+            PipelineCode.ACCEPTED, PipelineCode.SUBMITTED,
+            PipelineCode.INVALID_REQUEST,
             PipelineCode.STALE_SIGNAL, PipelineCode.DUPLICATE_INTENT,
             PipelineCode.RISK_REJECTED, PipelineCode.KILL_SWITCH,
             PipelineCode.SAFETY_REJECTED, PipelineCode.CONNECTION_NOT_FOUND,

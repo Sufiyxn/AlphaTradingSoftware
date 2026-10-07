@@ -1,9 +1,9 @@
 # Alpha Trading Platform — Binding 24-Phase Roadmap
 
-> **Approved.** Phases 1–7 are complete and verified. Phase 6 — *Connection & Execution Provider
-> Framework* — is **committed at its checkpoint**: the framework, tests, frontend card, and docs are
-> verified and committed. Phase 7 — *Canonical Trading Pipeline* — is verified with Phase 7 changes
-> **left uncommitted** pending review. Phases 8–24 are
+> **Approved.** Phases 1–9 are complete and verified. Phases 6 and 7 are **committed at their
+> checkpoints** (`Complete phase 6 execution provider framework`, `2f1eee5`), Phase 8 is committed
+> as `c8420ab`, and Phase 9 — *Order Lifecycle Management & Reconciliation* — is committed as
+> `Complete phase 9 order lifecycle and reconciliation`. Phases 10–24 are
 > binding scope.
 > **Do not start, reorder, or collapse phases without explicit approval.** Each phase ends only
 > after the verification protocol below passes with exact numbers reported.
@@ -21,17 +21,27 @@
 >
 > *Phase 7 was committed as `2f1eee5 Complete phase 7 canonical trading pipeline` (16 files,
 > +1613/−109) on top of Phase 6; nothing before it was amended.*
-> *Phase 8 checkpoint: the risk hardening described below is implemented and verified
+> *Phase 8 was committed as `c8420ab Complete phase 8 risk hardening` on top of Phase 7;
+> nothing before it was amended. The risk hardening described below is implemented and verified
 > (395 passed, 150 subtests; `tsc --noEmit` clean; `npm run build` succeeds; HTTP smoke passed
 > with 46 checks — accepted trade, reward:risk < 2, wrong-side/zero/missing price, duplicate
 > symbol, stale timestamp, tightened exposure, and kill-switch rejections, each journaled in
-> `risk_decisions` with its deciding code while exactly 1 order row reached the paper adapter)
-> and is **complete but left uncommitted** pending review. `RiskEngine` is the single
-> deterministic pre-trade boundary: sizing, exposure, daily loss, duplicate-symbol, price
-> sanity, 2:1 reward:risk, kill switch, and configuration limits are enforced before any
-> adapter can be called, and `RiskDecision` now records every field needed to audit the
-> decision from the journal alone. Full detail: `docs/PIPELINE.md`.
-> **Phase 9 has not started.***
+> `risk_decisions` with its deciding code while exactly 1 order row reached the paper adapter).
+> `RiskEngine` is the single deterministic pre-trade boundary: sizing, exposure, daily loss,
+> duplicate-symbol, price sanity, 2:1 reward:risk, kill switch, and configuration limits are
+> enforced before any adapter can be called, and `RiskDecision` now records every field needed
+> to audit the decision from the journal alone. Full detail: `docs/PIPELINE.md`.*
+> *Phase 9 (Order Lifecycle & Reconciliation) was approved and is implemented as described
+> below: `backend/orders/` owns the canonical order — a platform-minted `client_order_id`, a
+> `provider_order_id` taken verbatim, one state machine over submitted → accepted → partially
+> filled → filled plus terminal cancel/reject/expire, and executed quantity always derived from
+> the recorded fills; open orders reserve risk capacity under one submission lock; the
+> reconciler is read-only and only reports `MATCH` for a complete, error-free snapshot; every
+> cancellation attempt has its own outcome; orders/fills/lifecycle events are journaled and
+> rebuilt after a restart; `GET /api/orders` and owner-guarded `POST /api/orders/cancel`,
+> `/api/orders/reconcile` expose it. Verification: `462 passed, 150 subtests`. Full detail:
+> `docs/ORDERS.md`.*
+> **Phase 10 has not started.***
 
 ---
 
@@ -244,8 +254,8 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 5 | Real Market-Data Providers | **DONE** |
 | 6 | Connection & Execution Provider Framework | **DONE** |
 | 7 | Canonical Trading Pipeline | **DONE** (committed: `2f1eee5`) |
-| 8 | Risk Hardening | **DONE** (verified, uncommitted) |
-| 9 | Order Lifecycle Management & Reconciliation | pending |
+| 8 | Risk Hardening | **DONE** (committed: `c8420ab`) |
+| 9 | Order Lifecycle Management & Reconciliation | **DONE** (committed: `Complete phase 9 order lifecycle and reconciliation`) |
 | 10 | First-Class Position Management | pending |
 | 11 | Market-Session / Market-Hours Handling | pending |
 | 12 | Autonomous Decision Engine | pending |
@@ -262,10 +272,11 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 23 | Testing / Dependencies / CI | pending |
 | 24 | Final Integration / Production Readiness | pending |
 
-> The completed sequence 1–8 is fixed (Phase 6 is committed at its checkpoint; Phase 7 is
-> committed at `2f1eee5`; Phase 8 is verified and **uncommitted**). Phases 9–24
+> The completed sequence 1–9 is fixed (Phase 6 is committed at its checkpoint; Phase 7 is
+> committed at `2f1eee5`; Phase 8 is committed at `c8420ab`; Phase 9 was explicitly approved
+> and is committed at its own checkpoint). Phases 10–24
 > are all **pending**; their internal order may be refined only by an explicit, approved
-> documentation update. **Phase 9 must not begin without explicit approval.**
+> documentation update. **Phase 10 must not begin without explicit approval.**
 
 ---
 
@@ -393,7 +404,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 
 ---
 
-## Phase 6–7 (committed), Phase 8 (complete, uncommitted), and future phases (not started)
+## Phase 6–9 (committed), and future phases (not started)
 
 ### PHASE 6 — Connection & Execution Provider Framework · **DONE (COMMITTED)**
 
@@ -461,12 +472,12 @@ Delivered scope (was the future-phase scope below):
   duplicate orchestration paths; broker/provider agnostic; ensure no component can bypass
   risk/execution controls.
 
-### PHASE 8 — Risk Hardening · **DONE (UNCOMMITTED)**
+### PHASE 8 — Risk Hardening · **DONE (COMMITTED)**
 
 > Implemented and verified (395 passed, 150 subtests — `backend/tests/test_risk_hardening.py`
 > adds 68 tests / 29 subtests on top of the Phase 1–7 suites; `tsc --noEmit` clean;
-> `npm run build` succeeds; HTTP smoke passed with 46 checks) and deliberately **left
-> uncommitted** pending review. Full detail: `docs/PIPELINE.md` ("Risk controls").
+> `npm run build` succeeds; HTTP smoke passed with 46 checks) and committed as
+> `c8420ab Complete phase 8 risk hardening`. Full detail: `docs/PIPELINE.md` ("Risk controls").
 
 Delivered scope (was the future-phase scope below):
 
@@ -507,10 +518,63 @@ Delivered scope (was the future-phase scope below):
   configurable candidate-price and position limits; position sizing; daily loss limits; exposure
   limits; stop-loss/take-profit validation; risk re-evaluation before execution; fail closed.
 
-### PHASE 9 — Order Lifecycle Management & Reconciliation
-- Canonical order state machine across the pipeline: submitted → accepted → partially filled →
-  filled → canceled/rejected/expired; order/fill reconciliation against the execution provider
-  and the local journal; drift detection and honest unresolved states; restart recovery.
+### PHASE 9 — Order Lifecycle Management & Reconciliation · **DONE (COMMITTED)**
+
+> Implemented and verified (`462 passed, 150 subtests` — `backend/tests/test_order_lifecycle.py`
+> adds 66 tests on top of the Phase 1–8 suites; `tsc --noEmit` clean; `npm run build` succeeds;
+> HTTP smoke passed; no secret in any response) and committed as
+> `Complete phase 9 order lifecycle and reconciliation`. Full detail: `docs/ORDERS.md`.
+
+Delivered scope (as approved):
+
+- **canonical order** — new `backend/orders/` package: `OrderIntent` (the request),
+  `Order` (identity + status + fills), `Fill`, and one state machine
+  (`VALID_TRANSITIONS` / `can_transition` / `with_status`) over
+  `NEW → SUBMITTED → ACCEPTED → PARTIALLY_FILLED → FILLED` plus terminal
+  `CANCELLED` / `REJECTED` / `EXPIRED` / `FAILED`; an illegal move raises
+  `InvalidOrderTransition` instead of jumping status, re-applying a status is idempotent,
+  `UNKNOWN` recovers to a known state but no terminal state ever becomes `UNKNOWN`
+- **identity** — `client_order_id` is a platform-minted `uuid4().hex` (never a symbol, never a
+  timestamp); `provider_order_id` is stored verbatim from the provider, stays `None` until the
+  provider answers, and a later answer without one never clears it; a provider's "new" word
+  still normalizes to `ACCEPTED`, never the platform-only `NEW`
+- **fills** — `filled_quantity` / `average_fill_price` / `remaining_quantity` are always
+  recomputed from the recorded fills (volume-weighted average), de-duplicated by
+  `provider_fill_id`; a provider that claims more executed quantity than fills has that gap
+  journaled (`RECONCILIATION_DISCREPANCY`) and **never** a fabricated fill; a late fill on a
+  terminal order is recorded and journaled without rewriting the status
+- **pending-order risk reservation** — `PendingOrderReservation` on
+  `PortfolioSnapshot`; sizing subtracts reserved notional from exposure/cash/symbol room, max
+  positions counts pending symbols, a pending symbol counts as open (`DUPLICATE_SYMBOL`), the
+  exposure invariant uses `exposure + pending_notional + notional`, and
+  `RiskDecision.pending_exposure` records what was reserved. The whole risk → adapter →
+  registration path runs under one re-entrant `submission_lock` that the paper engine re-enters
+  while booking, so two intents can never size against the same capacity
+- **pipeline integration** — `TradingPipeline` creates the order only after the provider
+  answers (a failed submission records **no** order, only `ORDER_SUBMISSION_FAILED` with the
+  intent), journals `ORDER_CREATED`/`ORDER_SUBMITTED`/`ORDER_STATUS_CHANGED`/`ORDER_*_FILL`, and
+  returns the canonical order on `PipelineResult.order`; an accepted-but-unfilled answer is the
+  new `PipelineCode.SUBMITTED`, not a rejection
+- **reconciliation** — `OrderReconciler` is read-only and trust-carrying: `PROVIDER_ERROR` /
+  `INCOMPLETE` report empty findings and are never `MATCH`; 13 `DiscrepancyKind` values cover
+  missing/unknown/duplicate orders, status/quantity/partial-fill drift, missing or duplicate
+  provider fills, terminal-vs-open, and position drift (compared only when the provider
+  actually returns a book)
+- **cancellation** — `CancellationOutcome` (`CANCELLED`, `ALREADY_CANCELLED`, `NOT_CANCELABLE`,
+  `REJECTED_BY_PROVIDER`, `PROVIDER_ERROR`, `ORDER_NOT_FOUND`); a provider failure never
+  changes local state, an already-cancelled order is idempotent, a `NEW` order closes locally
+  without a provider call, and each attempt journals `ORDER_CANCELLED` /
+  `ORDER_CANCELLATION_FAILED`
+- **persistence + restart** — `orders` rows (serialized order), a new `order_fills` table with
+  `INSERT OR IGNORE` on the fill's own identity, `ORDER_*` / `RECONCILIATION_*` events, and
+  `OrderLifecycleService.restore()` rebuilding open orders (and their reservations) from the
+  journal, automatically at construction and when a host attaches a journal later
+- **exposure** — `ApplicationRuntime.list_orders` / `cancel_order` / `reconcile_orders`,
+  `GET /api/orders`, owner-guarded `POST /api/orders/cancel` (200/400/404/409) and
+  `POST /api/orders/reconcile` (200, read-only)
+- original scope, as approved: canonical order state machine across the pipeline;
+  order/fill reconciliation against the execution provider and the local journal; drift
+  detection and honest unresolved states; restart recovery.
 
 ### PHASE 10 — First-Class Position Management
 - Position management as a **first-class subsystem**, not a side effect of order execution:

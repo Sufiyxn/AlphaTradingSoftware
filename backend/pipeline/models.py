@@ -12,7 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from backend.execution.models import ExecutionMode, Order
+from backend.execution.models import ExecutionMode
+from backend.orders.models import Order
 from backend.risk.models import RiskDecision
 from backend.strategies.models import TradeSetup
 
@@ -20,11 +21,14 @@ from backend.strategies.models import TradeSetup
 class PipelineCode:
     """Deterministic outcome codes for the canonical execution pipeline.
 
-    ``ACCEPTED`` means the provider filled the order; every other code is a
-    fail-closed rejection with a stable machine-readable meaning.
+    ``ACCEPTED`` means the provider filled the order (in whole or in part);
+    ``SUBMITTED`` means the provider took the order but has not filled it yet,
+    so nothing is booked. Every other code is a fail-closed rejection with a
+    stable machine-readable meaning.
     """
 
     ACCEPTED = "ACCEPTED"
+    SUBMITTED = "SUBMITTED"
     # input and signal context
     INVALID_REQUEST = "INVALID_REQUEST"
     STALE_SIGNAL = "STALE_SIGNAL"
@@ -77,7 +81,13 @@ class ExecutionIntent:
 
 @dataclass(frozen=True, slots=True)
 class PipelineResult:
-    """Normalized pipeline outcome; safe to serialize without redaction."""
+    """Normalized pipeline outcome; safe to serialize without redaction.
+
+    ``order`` is the canonical order the platform owns - its internal id, its
+    lifecycle status, and the fills behind it - not the provider's own record.
+    It is ``None`` exactly when no order exists: never submitted, or the
+    provider failed before returning one.
+    """
 
     code: str
     reason: str | None = None

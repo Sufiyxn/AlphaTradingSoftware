@@ -156,13 +156,20 @@ did not approve (`docs/PIPELINE.md`, "Risk controls").
 (default `PAPER`; `LIVE` only meaningful behind the gate). `Order` carries `provider_reference`
 (the provider's own order id, `null` when local) and `updated_at`.
 
-`OrderStatus`: `SUBMITTED`, `ACCEPTED`, `REJECTED`, `PARTIALLY_FILLED`, `FILLED`, `CANCELLED`,
-`EXPIRED`, `FAILED`, `PENDING`, `UNKNOWN`. `normalize_order_status()` maps provider words
-("new", "partially-filled", "canceled", "failure", unknown junk) onto that vocabulary; anything
-unrecognized becomes `UNKNOWN` — never `FILLED`.
+`OrderStatus`: `NEW`, `SUBMITTED`, `ACCEPTED`, `REJECTED`, `PARTIALLY_FILLED`, `FILLED`,
+`CANCELLED`, `EXPIRED`, `FAILED`, `PENDING`, `UNKNOWN`. `normalize_order_status()` maps provider
+words ("new", "partially-filled", "canceled", "failure", unknown junk) onto that vocabulary;
+anything unrecognized becomes `UNKNOWN` — never `FILLED`, and a provider's "new" becomes
+`ACCEPTED`, never the platform-only `NEW`.
 
 `TradingPlatformAdapter` also defines `health_check()` (credentials alone are not connectivity)
 and `reconcile_orders(since=...)` for provider-side order/fill reconciliation.
+
+The order the platform owns — its internal `client_order_id`, its lifecycle status, and the
+fills behind the quantity — is the canonical `backend.orders.Order` written through the
+pipeline. The provider's `Order`/`OrderStatus` above is what an adapter returns; adoption,
+fill de-duplication, cancellation outcomes, and read-only reconciliation against
+`snapshot_from_adapter(...)` live in `backend/orders/` (`docs/ORDERS.md`).
 
 ## Multiple connections
 
@@ -195,6 +202,14 @@ States are tracked independently; `manager.aggregate_state()` returns one honest
   `local_paper`) and `readiness` (the overall readiness status, e.g. `LOCKED`). It does **not**
   repeat the execution connection fields; those are on `GET /api/readiness` and
   `GET /api/connections`.
+- `GET /api/orders` → the canonical order lifecycle: `orders[]` (`describe()`, secret-free),
+  `count`, `open_count`, `pending_reservation_count`; `?open=true` and `?symbol=` filter.
+- `POST /api/orders/cancel` with `{"order_id": "<client_order_id>"}` (owner token) → `200` for
+  `CANCELLED`/`ALREADY_CANCELLED`, `400` without an id, `404` `ORDER_NOT_FOUND`, `409` for every
+  other non-success (`PROVIDER_ERROR`, `REJECTED_BY_PROVIDER`, `NOT_CANCELABLE`).
+- `POST /api/orders/reconcile` (owner token) → read-only comparison of the journal with the
+  connection's adapter; `200` with `status` `MATCH`/`DISCREPANCIES`/`PROVIDER_ERROR`/
+  `INCOMPLETE`, `clean`, and the `discrepancies[]` findings (`docs/ORDERS.md`).
 - The dashboard renders the same payload as the "Execution provider" card; the browser never
   contacts a provider.
 

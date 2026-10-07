@@ -24,11 +24,23 @@ fabricated price or account value)::
 The caller (RiskEngine) then takes ``approved = min(safe_quantity,
 requested_quantity)`` - a request is only ever reduced, never increased. This
 sizing arithmetic constrains exposure; it makes no claim about profitability.
+
+Pending (submitted, not yet filled) orders reserve capacity too: their
+*remaining* notional is subtracted from the exposure room, from available
+cash, and from the symbol's room, so several open orders cannot collectively
+step past the same limits a single filled position would be held to. A filled
+order is no longer pending - its notional shows up as real position exposure
+instead - so the two never count twice.
 """
 from backend.portfolio.models import PortfolioSnapshot
 from backend.strategies.models import Direction
 
 from .config import RiskConfig
+
+
+def _pending(portfolio: PortfolioSnapshot) -> tuple:
+    pending = getattr(portfolio, "pending_reservations", ())
+    return tuple(pending) if pending else ()
 
 
 def sizing_terms(entry: float, stop: float, portfolio: PortfolioSnapshot,
@@ -44,13 +56,15 @@ def sizing_terms(entry: float, stop: float, portfolio: PortfolioSnapshot,
     if distance <= 0 or entry <= 0:
         return {"risk_budget": 0, "portfolio_exposure": 0, "cash": 0,
                 "position_notional": 0, "max_quantity": int(config.max_quantity)}
+    pending = _pending(portfolio)
+    reserved_notional = sum(item.notional for item in pending)
     risk_budget = min(portfolio.available_capital * config.risk_fraction,
                       portfolio.equity * config.max_risk_per_trade)
     if config.max_risk_amount is not None:
         risk_budget = min(risk_budget, config.max_risk_amount)
     exposure_room = max(0.0, portfolio.equity * config.max_portfolio_exposure_fraction
-                        - portfolio.exposure)
-    cash = max(0.0, portfolio.available_capital)
+                        - portfolio.exposure - reserved_notional)
+    cash = max(0.0, portfolio.available_capital - reserved_notional)
     terms = {
         "risk_budget": int(risk_budget // distance),
         "portfolio_exposure": int(exposure_room // entry),
@@ -64,7 +78,10 @@ def sizing_terms(entry: float, stop: float, portfolio: PortfolioSnapshot,
             position.average_entry_price if position.market_price is None else position.market_price)
             for position in portfolio.positions
             if position.symbol == wanted and (direction is None or position.direction is direction))
-        symbol_room = max(0.0, config.max_symbol_exposure - held)
+        reserved_symbol = sum(item.notional for item in pending
+                              if item.symbol == wanted
+                              and (direction is None or item.direction is direction))
+        symbol_room = max(0.0, config.max_symbol_exposure - held - reserved_symbol)
         terms["symbol_exposure"] = int(symbol_room // entry)
     return terms
 

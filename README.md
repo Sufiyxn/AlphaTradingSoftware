@@ -48,8 +48,9 @@ A fresh clone with an empty `.env` boots **fully disconnected**: no market data 
 
 - `GET /api/health`, `/api/status`, `/api/configuration`, `/api/capabilities`
 - `GET /api/opportunities`, `/api/quotes`, `/api/positions`, `/api/trades`
-- `GET /api/performance`, `/api/reports`, `/api/logs`
+- `GET /api/performance`, `/api/reports`, `/api/logs`, `/api/orders`
 - Authenticated `POST /api/control/start`, `/stop`, `/pause`, `/resume`, `/emergency-stop`, `/reset-emergency-stop`, `/terminate`, `/configuration`
+- Authenticated `POST /api/orders/cancel`, `/api/orders/reconcile`
 - `POST /api/webhooks/tradingview` (its own shared secret, no owner token required)
 
 Reports can be generated on demand and are also written by a local scheduler after the US regular session. The current notifier is an in-process local sink; it does not send email, SMS, or third-party messages. `GET /api/logs` supports `kind`, `format=json|csv`, inclusive `start`/`end` dates, and `symbol` filters.
@@ -87,7 +88,7 @@ The strategy/risk/backtest modules are available for local development. Risk rem
 
 ## Execution connections
 
-Execution is provider-agnostic (`docs/CONNECTIONS.md`). Every order - a TradingView alert, an orchestrator cycle, or an internal submission - travels the one canonical pipeline (`docs/PIPELINE.md`): intent validation, signal freshness, connection verification through the shared `ConnectionManager`, `RiskEngine`, the execution safety gate, mode/capability checks, then the verified adapter, with a deterministic outcome code and one journal record per decision. The runtime ships one implemented provider - the in-process `local_paper` account - and advertises external providers such as Alpaca and Robinhood as *not installed*; configuring their credentials reports `CONFIGURED`, never `CONNECTED`, and a connection test answers "not installed; no network request was made" instead of inventing a result. Credentials alone are never connectivity: a connection reaches `CONNECTED` only after authentication, account verification, and permission checks actually succeeded inside the freshness window, and the dashboard shows states and reasons only - never a secret value. Multiple client connections are tracked independently, capability limits (order types, short selling, live trading) are reported as limitations rather than assumed support, and the execution safety gate keeps `LIVE` locked while the risk kill switch and emergency stop stay between every decision and execution.
+Execution is provider-agnostic (`docs/CONNECTIONS.md`). Every order - a TradingView alert, an orchestrator cycle, or an internal submission - travels the one canonical pipeline (`docs/PIPELINE.md`): intent validation, signal freshness, connection verification through the shared `ConnectionManager`, `RiskEngine`, the execution safety gate, mode/capability checks, then the verified adapter, with a deterministic outcome code and one journal record per decision. Each order is then registered in the canonical order lifecycle (`docs/ORDERS.md`): a platform-owned `client_order_id`, a `provider_order_id` taken verbatim from the provider, one state machine over submitted/accepted/partially-filled/filled/cancelled/rejected/expired, and executed quantity always derived from the recorded fills. An order that is accepted but not yet filled is reported as `SUBMITTED` (not a rejection) and reserves risk capacity - duplicate-symbol, max-position, and exposure limits count it - until it fills or is cancelled. `GET /api/orders` lists them, `POST /api/orders/cancel` cancels one, and `POST /api/orders/reconcile` compares the journal with the provider read-only, reporting `PROVIDER_ERROR`/`INCOMPLETE` as unresolved rather than as a clean match. The runtime ships one implemented provider - the in-process `local_paper` account - and advertises external providers such as Alpaca and Robinhood as *not installed*; configuring their credentials reports `CONFIGURED`, never `CONNECTED`, and a connection test answers "not installed; no network request was made" instead of inventing a result. Credentials alone are never connectivity: a connection reaches `CONNECTED` only after authentication, account verification, and permission checks actually succeeded inside the freshness window, and the dashboard shows states and reasons only - never a secret value. Multiple client connections are tracked independently, capability limits (order types, short selling, live trading) are reported as limitations rather than assumed support, and the execution safety gate keeps `LIVE` locked while the risk kill switch and emergency stop stay between every decision and execution.
 
 ## Verification
 
@@ -97,6 +98,6 @@ cd frontend
 npm run build
 ```
 
-Expected: `395 passed, 150 subtests` on the backend (including `backend/tests/test_risk_hardening.py`), and a successful frontend type-check/build with no changes required for Phase 8 (risk decisions travel the existing API surface).
+Expected: `462 passed, 150 subtests` on the backend (including `backend/tests/test_risk_hardening.py` and `backend/tests/test_order_lifecycle.py`), and a successful frontend type-check/build with no changes required for Phase 9 (orders travel the existing API surface).
 
 SQLite journal data is stored under `data/alpha_trading.sqlite3` by default and is ignored by Git. Override `DATABASE_PATH` to use a different local file. Secrets belong only in `.env`; `.env` is ignored and `.env.example` contains no credentials.

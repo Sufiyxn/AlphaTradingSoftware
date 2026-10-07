@@ -48,6 +48,38 @@ class SQLiteJournalRepository:
             (order.order_id, order.created_at.isoformat(), order.request.symbol.strip().upper(),
              order.status.value, to_json(order)))
 
+    def record_order_fill(self, fill: Any, *, order_id: str | None = None,
+                          symbol: str | None = None) -> None:
+        """Record one execution exactly once.
+
+        ``INSERT OR IGNORE`` on the fill's platform identity is what makes a
+        replayed provider answer harmless: the same execution can be reported
+        any number of times and is still one row, so nothing double-counts
+        after a restart.
+        """
+        identifier = getattr(fill, "fill_id", None)
+        if not identifier:
+            identifier = getattr(fill, "provider_fill_id", None)
+        if not identifier:
+            return  # an execution with no identity cannot be de-duplicated
+        owner = order_id or getattr(fill, "order_id", None)
+        if not owner:
+            return
+        stamp = getattr(fill, "timestamp", None)
+        self._execute("""INSERT OR IGNORE INTO order_fills(
+                fill_id,order_id,timestamp,symbol,quantity,price,fee,
+                provider_fill_id,provider_order_id,context_json)
+            VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (identifier, owner, stamp.isoformat() if stamp else None,
+             (symbol or "").strip().upper() or None,
+             float(getattr(fill, "quantity", 0) or 0),
+             float(getattr(fill, "price", 0) or 0),
+             float(getattr(fill, "fee", 0) or 0),
+             getattr(fill, "provider_fill_id", None),
+             getattr(fill, "provider_order_id", None),
+             to_json({"order_id": owner, "side": (getattr(fill, "side", None).value
+                                                  if getattr(fill, "side", None) else None)})))
+
     def record_trade_open(self, trade: Any, *, setup: Any = None, risk: Any = None,
                           analysis: Any = None) -> None:
         context = {"setup": setup, "risk": risk, "ai_analysis": analysis}
@@ -109,6 +141,7 @@ class SQLiteJournalRepository:
         specs = {
             "trades": ("trades", "COALESCE(exit_timestamp,entry_timestamp)", "symbol", ("context_json",)),
             "orders": ("orders", "timestamp", "symbol", ("context_json",)),
+            "fills": ("order_fills", "timestamp", "symbol", ("context_json",)),
             "signals": ("strategy_signals", "timestamp", "symbol", ("context_json",)),
             "risk_decisions": ("risk_decisions", "timestamp", "symbol", ("reasons_json", "context_json")),
             "ai_analyses": ("ai_analyses", "timestamp", "symbol", ("context_json",)),
@@ -203,6 +236,7 @@ class SQLiteJournalRepository:
             entry_price REAL NOT NULL, stop_price REAL NOT NULL, target_price REAL NOT NULL,
             exit_price REAL, quantity REAL NOT NULL, pnl REAL, reward_risk_ratio REAL, context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS orders(order_id TEXT PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,status TEXT NOT NULL,context_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS order_fills(fill_id TEXT PRIMARY KEY,order_id TEXT NOT NULL,timestamp TEXT NOT NULL,symbol TEXT,quantity REAL NOT NULL,price REAL NOT NULL,fee REAL NOT NULL,provider_fill_id TEXT,provider_order_id TEXT,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS strategy_signals(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,strategy TEXT NOT NULL,direction TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS risk_decisions(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,approved INTEGER NOT NULL,reasons_json TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ai_analyses(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,recommendation TEXT NOT NULL,score REAL NOT NULL,context_json TEXT NOT NULL);
@@ -211,6 +245,7 @@ class SQLiteJournalRepository:
         CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT,message TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS daily_performance(report_date TEXT PRIMARY KEY,context_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS ix_trades_exit ON trades(exit_timestamp);
+        CREATE INDEX IF NOT EXISTS ix_fills_order ON order_fills(order_id);
         CREATE INDEX IF NOT EXISTS ix_events_timestamp ON system_events(timestamp);
         CREATE INDEX IF NOT EXISTS ix_errors_timestamp ON errors(timestamp);
         """

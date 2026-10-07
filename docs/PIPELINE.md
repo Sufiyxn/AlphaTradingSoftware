@@ -1,4 +1,4 @@
-# Canonical Trading Pipeline & Risk Controls (Phases 7–8)
+# Canonical Trading Pipeline & Risk Controls (Phases 7–9)
 
 The one path from an execution request to an order. Every signal source — a TradingView alert,
 the orchestrator's scanner cycle, an internal caller — hands an `ExecutionIntent` (or a
@@ -7,14 +7,17 @@ pre-approved `RiskDecision`) to `PaperTradingEngine.submit_decision`, which runs
 adapter without an approved `RiskDecision` from the single `RiskEngine` inside the pipeline.
 
 - Code: `backend/pipeline/` (`models.py`, `service.py`); risk: `backend/risk/`
-  (`config.py`, `models.py`, `service.py`, `sizing.py`)
+  (`config.py`, `models.py`, `service.py`, `sizing.py`); orders: `backend/orders/`
+  (`models.py`, `lifecycle.py`, `store.py`, `provider.py`, `reconcile.py`, `cancellation.py`,
+  `service.py`) — see `docs/ORDERS.md`
 - Entry point: `backend/paper_trading/engine.py` (`submit` / `execute` / `submit_decision`)
 - Signal paths: `backend/tradingview/service.py::_execute_entry`,
   `backend/orchestrator/service.py::_run_cycle`
 - Wiring: `backend/core/runtime.py` — the paper engine shares the runtime's
   `ConnectionManager`, so the Connection Center reports the same connection the orders use;
   `RiskEngine` is constructed with the loaded `RiskConfig` and the shared clock
-- Tests / proof: `backend/tests/test_pipeline.py`, `backend/tests/test_risk_hardening.py`
+- Tests / proof: `backend/tests/test_pipeline.py`, `backend/tests/test_risk_hardening.py`,
+  `backend/tests/test_order_lifecycle.py`
 
 ## Canonical flow
 
@@ -28,24 +31,35 @@ signal source (TradingView alert | scanner cycle | internal)
        3. signal freshness        - STALE_SIGNAL (before risk, before any adapter)
        4. resolve + verify        - ConnectionManager.get/verify; CONNECTION_NOT_FOUND /
                                     CONNECTION_NOT_READY / PROVIDER_* by honest state
-       5. risk evaluation         - RiskEngine against the live portfolio snapshot, with the
-                                    signal's quantity cap passed in as requested_quantity
-                                    (reduce-only, folded into sizing); journaled exactly once
-                                    -> RISK_REJECTED / KILL_SWITCH
+       5. risk evaluation         - RiskEngine against the portfolio snapshot with the capacity
+                                     open orders already commit attached (pending reservations),
+                                     with the signal's quantity cap passed in as requested_quantity
+                                     (reduce-only, folded into sizing); journaled exactly once
+                                     -> RISK_REJECTED / KILL_SWITCH
        6. execution safety gate   - ExecutionSafetyGate.authorize(mode)
-                                    -> KILL_SWITCH / SAFETY_REJECTED
+                                     -> KILL_SWITCH / SAFETY_REJECTED
        7. mode + capabilities     - UNSUPPORTED_MODE / CAPABILITY_UNAVAILABLE
        8. submit                  - connections.adapter_for(id).place_order(...) - the only
-                                    place_order call in the product outside backend/execution/
-                                    classified failures -> PROVIDER_AUTH_FAILURE /
-                                    PROVIDER_TIMEOUT / PROVIDER_RATE_LIMIT / PROVIDER_UNAVAILABLE
-       9. normalize status        - fill states -> ACCEPTED, anything else ->
-                                    PROVIDER_EXECUTION_REJECTION
-      10. journal                 - record_risk_decision, record_order, EXECUTION_SUBMITTED /
-                                    EXECUTION_REJECTED / EXECUTION_DUPLICATE (journal errors
-                                    never block trading)
-      11. PipelineResult          - code, reason, risk, order, setup, connection_id, provider_id,
-                                    mode, source, safety evidence
+                                     place_order call in the product outside backend/execution/
+                                     classified failures -> PROVIDER_AUTH_FAILURE /
+                                     PROVIDER_TIMEOUT / PROVIDER_RATE_LIMIT / PROVIDER_UNAVAILABLE
+                                     A failed submission records **no** order: only
+                                     ORDER_SUBMISSION_FAILED carries the intent for audit.
+       9. register the order      - backend/orders: create (NEW) -> mark_submitted (SUBMITTED,
+                                     provider_order_id verbatim or left None) ->
+                                     apply_provider_order (status + fills); filled_quantity is
+                                     always derived from the fills, and a reported quantity
+                                     beyond them is journaled as a discrepancy instead of a
+                                     fill -> ORDER_CREATED / ORDER_SUBMITTED / ORDER_STATUS_*
+                                     / ORDER_*_FILL
+      10. normalize status        - fill states with quantity > 0 -> ACCEPTED, open states ->
+                                     SUBMITTED, anything else -> PROVIDER_EXECUTION_REJECTION
+      11. journal                 - record_risk_decision, record_order, record_order_fill,
+                                     EXECUTION_SUBMITTED / EXECUTION_REJECTED /
+                                     EXECUTION_DUPLICATE (journal errors never block trading)
+      12. PipelineResult          - code, reason, risk, order (the canonical backend.orders.Order),
+                                     setup, connection_id, provider_id, mode, source, safety
+                                     evidence
   -> PaperTradingEngine books the fill exactly once -> SubmissionResult
 ```
 
@@ -139,14 +153,38 @@ requested/approved quantities) and never re-evaluates or weakens a pre-approved 
   day's window rather than poisoning it. Everything else in memory (sizing caches, idempotency
   window) is rebuilt or intentionally volatile.
 
+## Order lifecycle (Phase 9)
+
+Every order the pipeline submits is registered in `backend/orders/` as a canonical `Order`
+— an internal `client_order_id` minted by the platform, a `provider_order_id` taken verbatim
+from the provider (never invented, never used as the internal identity), a status from one
+state machine, and the fills behind the quantity. Full vocabulary, state diagram,
+reconciliation kinds, cancellation outcomes, and restart recovery: `docs/ORDERS.md`.
+
+What the pipeline adds to the risk story:
+
+- an **open order reserves capacity**. Until it fills, its remaining quantity at the price it
+  carries is attached to the risk snapshot as `pending_reservations`, so a second intent on the
+  same symbol (`DUPLICATE_SYMBOL`), a sixth intent (`MAX_POSITIONS_REACHED`), or an exposure
+  overrun is refused before the adapter is touched. `RiskDecision.pending_exposure` records the
+  reserved notional.
+- the whole risk → adapter → registration path runs under one re-entrant
+  `submission_lock`, which `PaperTradingEngine` re-enters while booking the fill, so two
+  intents can never size themselves against the same capacity.
+- a **failed submission leaves no order** — only an `ORDER_SUBMISSION_FAILED` event — because
+  the platform never records an order it cannot prove exists.
+- `result.order` is the canonical order (`None` exactly when no order exists), and an accepted
+  but unfilled answer is `PipelineCode.SUBMITTED`, not a rejection.
+
 ## Rejection codes
 
 `PipelineCode` (`backend/pipeline/models.py`) is the stable machine vocabulary; `ALL_CODES`
-lists all 16 and a test asserts the set never drifts silently.
+lists all 17 and a test asserts the set never drifts silently.
 
 | Code | Meaning |
 |---|---|
 | `ACCEPTED` | The provider filled the order (or partially filled with `filled_quantity > 0`). |
+| `SUBMITTED` | The provider accepted the order but has not executed it yet; it is open and reserves capacity. |
 | `INVALID_REQUEST` | No/invalid setup, bad price or quantity, freshness without a timestamp. |
 | `STALE_SIGNAL` | The signal is older than `max_age_seconds`. |
 | `DUPLICATE_INTENT` | This idempotency key already produced a result; nothing new was submitted. |
@@ -170,6 +208,7 @@ lists all 16 and a test asserts the set never drifts silently.
 | Pipeline outcome | HTTP |
 |---|---|
 | `ACCEPTED` (trade booked) | `202 ACCEPTED` |
+| `SUBMITTED` (order open, not filled) | `503 EXECUTION_UNAVAILABLE` with `order_status=SUBMITTED` |
 | `STALE_SIGNAL` | `400 INVALID_PAYLOAD` / `STALE_TIMESTAMP` |
 | `INVALID_REQUEST` | `400 INVALID_PAYLOAD` |
 | risk not approved (`RISK_REJECTED`, `KILL_SWITCH`) | `422 RISK_REJECTED` with `reasons` |
@@ -180,10 +219,10 @@ Replay/duplicate protection (`409 DUPLICATE_SIGNAL`) still happens in the webhoo
 the pipeline; the pipeline's own idempotency key (`signal_id`) is the second line of defence.
 
 **Orchestrator**: reads the same result — approved trade booked → counts as approved;
-risk not approved → `_risk_rejected`; order present but not filled → "did not fill" error;
-other rejection → recorded with the pipeline code. The orchestrator no longer calls
-`RiskEngine.evaluate` or journals risk itself; the pipeline does, and the fixture event order
-(`strategy → risk → execution`) still holds.
+risk not approved → `_risk_rejected`; order present but not filled (including `SUBMITTED`) →
+"did not fill" error; other rejection → recorded with the pipeline code. The orchestrator no
+longer calls `RiskEngine.evaluate` or journals risk itself; the pipeline does, and the fixture
+event order (`strategy → risk → execution`) still holds.
 
 ## Idempotency
 
@@ -243,8 +282,30 @@ there is no direct-to-adapter path even in tests.
   enforced around risk, reason-string contracts, and a provider-agnostic source scan of
   `backend/risk/*.py`.
 
+`backend/tests/test_order_lifecycle.py` (Phase 9, 66 tests):
+
+- the state machine itself (legal chain, terminal statuses final, illegal moves raising,
+  idempotent re-application, `UNKNOWN` recovery, provider "new" ≠ local `NEW`);
+- identity (uuid-shaped client ids, provider id only from the provider, journal-compatible
+  `request`/`order_id`, secret-free `describe()`);
+- fill accounting (sum, volume-weighted average, partial → filled, replay de-duplication, a
+  quantity gap journaled and never invented, a late fill on a cancelled order);
+- pipeline integration (`NEW → SUBMITTED → FILLED`, `SUBMITTED` for an accepted-but-unfilled
+  order, a failed submission leaving no order, risk rejections never reaching the store,
+  duplicate-symbol and max-position reservations, capacity released on fill, concurrent
+  intents sizing against the same open orders);
+- cancellation (all six outcomes, idempotency, provider failure leaving local state alone);
+- reconciliation (`MATCH`, drift, `PROVIDER_ERROR`/`INCOMPLETE` never a match, missing/unknown/
+  duplicate orders, missing provider fills, position drift only with a book, no mutation);
+- persistence (order/fill/event rows, restart restore, concurrent store writes) and the
+  `GET`/`POST /api/orders*` endpoints;
+- architecture: `backend/orders/**` never contains `place_order(`.
+
 Verification (Phase 8): `395 passed, 150 subtests`; `tsc --noEmit` clean; `npm run build`
 succeeds; HTTP smoke passed (46 checks: accepted trade → position; reward:risk < 2, wrong-side
 stop, zero/missing stop, duplicate symbol, stale timestamp, tightened exposure, and kill switch
 each rejected with the right code while exactly 1 order row and 5 risk-decision rows reached the
 journal; owner emergency-stop/reset round trip; no secret in any response).
+
+Verification (Phase 9): `462 passed, 150 subtests`; `tsc --noEmit` clean; `npm run build`
+succeeds; HTTP smoke passed; no secret in any response.

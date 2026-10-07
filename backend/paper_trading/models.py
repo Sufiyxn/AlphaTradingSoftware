@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from backend.execution.models import Order
+from backend.orders.models import Order
 from backend.risk.models import RiskDecision
 from backend.strategies.models import Direction
 

@@ -13,12 +13,22 @@ orchestrator, and the paper engine all hand an ``ExecutionIntent`` (or a
 pre-approved ``RiskDecision``) to this pipeline. The pipeline never fabricates
 a price, never re-implements risk rules (it asks ``RiskEngine``), never bypasses
 the safety gate, and never submits without a verified connection.
+
+Two lifecycle guarantees live here:
+
+* the whole path - risk evaluation, order creation, submission, and the
+  recorded outcome - runs under one re-entrant ``submission_lock``, so two
+  intents racing each other can never both size against the same free
+  capacity;
+* the order the pipeline returns is the platform's canonical order (internal
+  id, lifecycle status, fills), never the provider's own record of it.
 """
 from __future__ import annotations
 
 import logging
 import math
 import threading
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -39,7 +49,9 @@ from backend.execution.models import (
     OrderType,
     normalize_order_status,
 )
+from backend.orders import Order, OrderIntent, OrderLifecycleService
 from backend.portfolio import Portfolio
+from backend.portfolio.models import PortfolioSnapshot
 from backend.risk import RiskEngine
 from backend.risk.models import RiskCode, RiskDecision, RiskStatus
 from backend.strategies.models import Direction, TradeSetup
@@ -52,6 +64,9 @@ logger = logging.getLogger(__name__)
 MAX_IDEMPOTENCY_KEYS = 512
 
 _FILL_STATES = (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED)
+#: The provider has the order but has not executed it yet.
+_OPEN_STATES = (OrderStatus.SUBMITTED, OrderStatus.PENDING, OrderStatus.ACCEPTED,
+                OrderStatus.PARTIALLY_FILLED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,15 +94,34 @@ class TradingPipeline:
         self._connections = connections
         self._risk_engine = risk_engine
         self._portfolio = portfolio
-        self.journal = journal
         self._clock = clock
         self._default_connection_id = str(connection_id or "paper")
         self._lock = threading.Lock()
+        #: One re-entrant lock for the whole risk -> order -> submit -> record
+        #: path. The paper engine re-enters it while booking the fill, so a
+        #: concurrent intent can never size itself against capacity that the
+        #: intent in front of it has already committed.
+        self.submission_lock = threading.RLock()
         self._completed: dict[str, PipelineResult] = {}
+        self.orders = OrderLifecycleService(journal=None, clock=clock, restore=False)
+        self._journal = None
+        self.journal = journal
 
     @property
     def connections(self) -> ConnectionManager:
         return self._connections
+
+    @property
+    def journal(self):
+        """The audit journal shared by the pipeline and the order lifecycle."""
+        return self._journal
+
+    @journal.setter
+    def journal(self, value) -> None:
+        self._journal = value
+        # A host (the paper engine, the orchestrator) may attach the journal
+        # after construction; the order store is rebuilt the moment it lands.
+        self.orders.attach_journal(value)
 
     @property
     def gate(self):
@@ -149,6 +183,13 @@ class TradingPipeline:
 
     # ------------------------------------------------------------------ steps
     def _run(self, request: _Request, decision: RiskDecision | None = None) -> PipelineResult:
+        # The whole path runs under one re-entrant lock: risk sizing reads the
+        # portfolio and the open-order reservations together, so no second
+        # intent can size itself against capacity this one is about to take.
+        with self.submission_lock:
+            return self._run_locked(request, decision)
+
+    def _run_locked(self, request: _Request, decision: RiskDecision | None) -> PipelineResult:
         key = request.idempotency_key
         if key is not None:
             with self._lock:
@@ -211,7 +252,7 @@ class TradingPipeline:
             # min(safe, requested) - a request is only ever reduced, never
             # widened - and the decision records both values for audit.
             decision = self._risk_engine.evaluate(
-                request.setup, self._portfolio.snapshot(),
+                request.setup, self._risk_snapshot(),
                 requested_quantity=request.requested_quantity)
             decision = self._apply_quantity_cap(request, decision)
             self._record_risk(decision)
@@ -275,24 +316,38 @@ class TradingPipeline:
                 risk=decision, connection=record, safety_reason=safety_reason)
 
         # 8. submit through the verified adapter ------------------------------
-        failure = self._submit(request, decision, adapter, record)
-        if isinstance(failure, PipelineResult):
-            failure = replace(failure, risk=decision, connection_id=record.connection_id,
-                              provider_id=record.provider_id)
-            return failure
-        order = failure
+        #    The canonical order is only registered once the provider has
+        #    actually answered: a failed submission must never leave behind an
+        #    order the platform cannot prove exists.
+        intent = self._order_intent(request, decision, record, connection_id)
+        submitted = self._submit(request, decision, adapter, record)
+        if isinstance(submitted, PipelineResult):
+            self.orders.note_submission_failure(
+                intent, submitted.reason or submitted.code, now=self._clock(),
+                connection_id=record.connection_id, provider_id=record.provider_id)
+            return replace(submitted, risk=decision,
+                           connection_id=record.connection_id,
+                           provider_id=record.provider_id)
+        order = self._register_order(intent, submitted, record)
         self._record_order(order)
 
-        # 9. normalize the provider's status ----------------------------------
-        status = normalize_order_status(getattr(order, "status", None))
-        filled = getattr(order, "filled_quantity", 0) or 0
-        accepted = status in _FILL_STATES and filled > 0
+        # 9. normalize the provider's status against the canonical order ------
+        status = normalize_order_status(getattr(submitted, "status", None))
+        filled = float(getattr(order, "filled_quantity", 0) or 0)
 
         # 10./11. journal the outcome and return the normalized result --------
-        if accepted:
+        if status in _FILL_STATES and filled > 0:
             return self._outcome(
                 request, code=PipelineCode.ACCEPTED, risk=decision, order=order,
                 connection=record, safety_reason=safety_reason, submitted=True)
+        if status in _OPEN_STATES:
+            # The provider owns the order but has executed nothing yet: a real
+            # outcome, not a rejection, and nothing is booked from it.
+            return self._outcome(
+                request, code=PipelineCode.SUBMITTED, risk=decision, order=order,
+                connection=record, safety_reason=safety_reason, submitted=True,
+                reason=(f"the provider accepted the order but has not filled it "
+                        f"({status.value})"))
         reason = f"the provider did not fill the order ({status.value}"
         rejection = getattr(order, "rejection_reason", None)
         if rejection:
@@ -305,6 +360,62 @@ class TradingPipeline:
             submitted=True, reason=reason)
 
     # ------------------------------------------------------------ step helpers
+    def _risk_snapshot(self):
+        """The portfolio snapshot plus the capacity open orders already commit.
+
+        Reservations are attached here rather than inside ``RiskEngine`` so a
+        snapshot handed straight to risk in a test stays exactly what the
+        portfolio produced; only the canonical pipeline carries open orders
+        into a risk evaluation.
+        """
+        snapshot = self._portfolio.snapshot()
+        reservations = self.orders.pending_reservations()
+        if reservations and isinstance(snapshot, PortfolioSnapshot):
+            return replace(snapshot, pending_reservations=reservations)
+        return snapshot
+
+    def _order_intent(self, request: _Request, decision: RiskDecision,
+                      record: ConnectionRecord, connection_id: str) -> OrderIntent:
+        """Build the platform's request. The id is ours, never a symbol/timestamp."""
+        risk_code = getattr(decision, "code", None)
+        if isinstance(risk_code, RiskCode):
+            risk_code = risk_code.value
+        elif not isinstance(risk_code, str):
+            risk_code = None
+        return OrderIntent(
+            client_order_id=uuid.uuid4().hex,
+            symbol=str(request.setup.symbol).strip().upper(),
+            direction=request.setup.direction,
+            quantity=float(decision.quantity),
+            order_type=OrderType.LIMIT,
+            limit_price=request.limit_price,
+            time_in_force="DAY",
+            execution_mode=request.mode,
+            connection_id=connection_id,
+            provider_id=record.provider_id,
+            source=request.source,
+            signal_id=request.signal_id,
+            risk_code=risk_code,
+        )
+
+    def _register_order(self, intent: OrderIntent, provider_order, record: ConnectionRecord) -> Order:
+        """Record the canonical order the provider just acknowledged."""
+        now = self._clock()
+        try:
+            order = self.orders.create(intent, now=now,
+                                       connection_id=record.connection_id,
+                                       provider_id=record.provider_id)
+            order = self.orders.mark_submitted(
+                order.client_order_id, getattr(provider_order, "order_id", None), now=now)
+            order = self.orders.apply_provider_order(
+                order.client_order_id, provider_order, now=now)
+        except Exception:  # noqa: BLE001 - a store bug must not hide the provider's answer
+            logger.exception("Unable to record the canonical order lifecycle")
+            return provider_order
+        reported = float(getattr(provider_order, "filled_quantity", 0) or 0)
+        if reported > float(order.filled_quantity) + 1e-9:
+            self.orders.note_fill_gap(order.client_order_id, reported, now=now)
+        return order
     def _validation_failure(self, request: _Request) -> tuple[str, str] | None:
         setup = request.setup
         if not isinstance(setup, TradeSetup):
@@ -459,10 +570,11 @@ class TradingPipeline:
             submitted=submitted,
             at=self._clock(),
         )
-        if code == PipelineCode.ACCEPTED:
+        if code in (PipelineCode.ACCEPTED, PipelineCode.SUBMITTED):
+            symbol = request.setup.symbol if isinstance(request.setup, TradeSetup) else "the request"
             self._record_event(
                 "EXECUTION_SUBMITTED",
-                f"execution pipeline submitted {request.setup.symbol} via {result.provider_id}",
+                f"execution pipeline submitted {symbol} via {result.provider_id}",
                 request=request, code=code, reason=None, order=order, risk=risk)
         else:
             symbol = request.setup.symbol if isinstance(request.setup, TradeSetup) else None

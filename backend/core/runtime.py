@@ -20,6 +20,7 @@ from backend.execution import (
 )
 from backend.market_data import MarketDataBridge, MarketDataService, build_market_data_provider
 from backend.market_data.session import NEW_YORK, market_session
+from backend.orders.provider import snapshot_from_adapter
 from backend.orchestrator import OrchestratorConfig, TradingOrchestrator
 from backend.paper_trading import PaperTradingEngine, PositionValuationService, reconcile_journal
 from backend.portfolio import Portfolio
@@ -166,6 +167,50 @@ class ApplicationRuntime:
     @property
     def mode(self) -> str:
         return self.config.trading.selection.effective.value
+
+    # ----------------------------------------------------------- order lifecycle
+    @property
+    def orders(self):
+        """The canonical order lifecycle: state, journal, reconciliation.
+
+        This is the same object the pipeline writes through, so what the API
+        reports is exactly what was recorded - not a second, drift-prone copy.
+        """
+        return self.paper.pipeline.orders
+
+    def list_orders(self, *, open_only: bool = False,
+                    symbol: str | None = None) -> dict:
+        orders = self.orders.list(open_only=open_only, symbol=symbol)
+        return {
+            "orders": [order.describe() for order in orders],
+            "count": len(orders),
+            "open_count": len(self.orders.store.open_orders()),
+            "pending_reservation_count": len(self.orders.pending_reservations()),
+        }
+
+    def cancel_order(self, order_id: str) -> dict:
+        """Cancel one order under the submission lock; failures stay visible."""
+        with self.paper.pipeline.submission_lock:
+            return self.orders.cancel(str(order_id or "")).to_dict()
+
+    def reconcile_orders(self) -> dict:
+        """Compare the journal with the execution provider, read-only."""
+        connection_id = self.paper.connection_id
+        try:
+            adapter = self.connection_manager.adapter_for(connection_id)
+        except Exception:  # noqa: BLE001 - an unusable connection is a finding
+            adapter = None
+        if adapter is None:
+            adapter = self.execution
+        identify = getattr(adapter, "identify", None)
+        provider_id = str(identify() or "") if callable(identify) else None
+        snapshot = snapshot_from_adapter(adapter, now=self.clock(),
+                                         connection_id=connection_id,
+                                         provider_id=provider_id)
+        with self.paper.pipeline.submission_lock:
+            report = self.orders.reconcile(snapshot, positions=self.portfolio.positions,
+                                           now=self.clock())
+        return report.to_dict()
 
     def refresh_market(self, symbols=None):
         """Fetch real quotes, mark open positions, and evaluate automatic exits."""

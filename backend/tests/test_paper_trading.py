@@ -113,7 +113,13 @@ class PaperTradingTests(unittest.TestCase):
         result = engine.submit(setup())
         self.assertTrue(result.accepted)
         self.assertEqual(len(portfolio.positions), 1)
-        self.assertEqual(router.get_order(result.order.order_id), result.order)
+        provider_order = router.get_order(result.order.provider_order_id)
+        self.assertIsNotNone(provider_order,
+                             "the provider must hold the order under its own id")
+        self.assertEqual(provider_order.order_id, result.order.provider_order_id)
+        self.assertEqual(provider_order.status, OrderStatus.FILLED)
+        self.assertNotEqual(result.order.order_id, provider_order.order_id,
+                            "the platform's order id is never the provider's")
 
     def test_kill_switch_blocks_a_previously_approved_submission(self):
         provider = MockExecutionProvider()

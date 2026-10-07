@@ -128,7 +128,12 @@ class PaperTradingEngine:
 
     @property
     def trades(self) -> tuple[PaperTradeRecord, ...]:
-        return tuple(self._records[key] for key in self._records)
+        """The open trade book, listed in the same symbol order as the
+        positions it mirrors so the two views of one book always line up."""
+        return tuple(self._records[key] for key in sorted(
+            self._records, key=lambda key: (self._records[key].symbol,
+                                            self._records[key].entry_timestamp,
+                                            key)))
 
     # -- canonical submission ------------------------------------------------
     def submit(self, setup: TradeSetup, *, source: str = "internal",
@@ -144,9 +149,13 @@ class PaperTradingEngine:
 
     def execute(self, intent: ExecutionIntent, *, analysis=None) -> SubmissionResult:
         """Run one ExecutionIntent through the pipeline, then book the fill."""
-        prepared = self._prepare(intent)
-        result = self.pipeline.execute(prepared)
-        return self._finalize(result, analysis=analysis)
+        # Booking a fill changes the capacity the *next* intent will be sized
+        # against, so submission and booking share the pipeline's lock: two
+        # intents racing each other can never both spend the same room.
+        with self.pipeline.submission_lock:
+            prepared = self._prepare(intent)
+            result = self.pipeline.execute(prepared)
+            return self._finalize(result, analysis=analysis)
 
     def submit_decision(self, subject, *, analysis=None,
                         source: str = "internal") -> SubmissionResult:
@@ -158,12 +167,13 @@ class PaperTradingEngine:
         verification, the safety gate, the execution mode check, and the
         selected adapter inside :class:`TradingPipeline`.
         """
-        if isinstance(subject, RiskDecision):
-            result = self.pipeline.execute_decision(
-                subject, limit_price=self._fill_price(subject.setup), source=source)
-        else:
-            result = self.pipeline.execute(self._prepare(subject))
-        return self._finalize(result, analysis=analysis)
+        with self.pipeline.submission_lock:
+            if isinstance(subject, RiskDecision):
+                result = self.pipeline.execute_decision(
+                    subject, limit_price=self._fill_price(subject.setup), source=source)
+            else:
+                result = self.pipeline.execute(self._prepare(subject))
+            return self._finalize(result, analysis=analysis)
 
     def _prepare(self, intent: ExecutionIntent) -> ExecutionIntent:
         """Attach the paper slippage-adjusted price the adapter will fill at."""

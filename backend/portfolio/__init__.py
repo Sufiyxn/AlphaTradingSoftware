@@ -1,6 +1,7 @@
 """Broker-neutral portfolio state models and ledger."""
 
-from .models import PortfolioSnapshot, Position, PriceState
+from .models import PendingOrderReservation, PortfolioSnapshot, Position, PriceState
 from .service import Portfolio
 
-__all__ = ["Portfolio", "PortfolioSnapshot", "Position", "PriceState"]
+__all__ = ["PendingOrderReservation", "Portfolio", "PortfolioSnapshot", "Position",
+           "PriceState"]

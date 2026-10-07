@@ -58,6 +58,10 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                                   runtime.orchestrator.config.universe.symbols)}
                 elif path == "/api/positions":
                     result = _positions_payload(runtime)
+                elif path == "/api/orders":
+                    open_only = str(_one(query, "open") or "").lower() in ("1", "true", "yes")
+                    result = runtime.list_orders(open_only=open_only,
+                                                 symbol=_one(query, "symbol"))
                 elif path == "/api/portfolio":
                     result = runtime.portfolio.snapshot()
                 elif path == "/api/trades":
@@ -158,6 +162,18 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     result = runtime.connections.test(section)
                     controls.audit_connection_test(token, section, result)
                     return self._send(200 if result["success"] else 409, result)
+                if parsed.path == "/api/orders/cancel":
+                    controls.authorize_owner(token)
+                    order_id = str(body.get("order_id") or body.get("client_order_id") or "")
+                    if not order_id:
+                        return self._send(400, {"error": "order_id is required"})
+                    outcome = runtime.cancel_order(order_id)
+                    status = 200 if outcome["success"] else (
+                        404 if outcome["outcome"] == "ORDER_NOT_FOUND" else 409)
+                    return self._send(status, outcome)
+                if parsed.path == "/api/orders/reconcile":
+                    controls.authorize_owner(token)
+                    return self._send(200, runtime.reconcile_orders())
                 actions = {
                     "/api/control/start": lambda: controls.start(token),
                     "/api/control/stop": lambda: controls.stop(token),

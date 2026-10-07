@@ -71,6 +71,11 @@ class RiskDecision:
     are the caller's setup prices, exposure/equity/daily P&L come from the
     canonical portfolio snapshot, and ``decided_at`` is excluded from equality
     so two evaluations of identical state remain equal.
+
+    ``pending_exposure`` is the notional the risk layer reserved for orders
+    that are still open (submitted but not fully filled). It is capacity held
+    aside, not an open position, and it disappears from the projection the
+    moment those orders reach a terminal state.
     """
 
     status: RiskStatus
@@ -91,6 +96,7 @@ class RiskDecision:
     daily_pnl: float = 0.0
     equity: float = 0.0
     symbol_open: bool = False
+    pending_exposure: float = 0.0
     limits: tuple[tuple[str, float | int | bool], ...] = ()
     decided_at: datetime | None = field(default=None, compare=False)
 
