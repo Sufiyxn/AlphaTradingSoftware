@@ -1,4 +1,4 @@
-# Connections & Execution Providers (Phase 6)
+# Connections & Execution Providers (Phases 6–7)
 
 The provider-agnostic framework that sits between the platform and any broker/trading platform a
 client may connect. It answers three questions honestly and only from evidence:
@@ -12,10 +12,12 @@ This phase is **not** an Alpaca or Robinhood integration. Alpaca and Robinhood a
 
 - Code: `backend/connections/` (manager, registry, models, credentials, errors),
   `backend/execution/` (interface, capabilities, gate, models, local paper adapter)
+- Order path (Phase 7): `backend/pipeline/` — orders travel this manager; see `docs/PIPELINE.md`
 - Connection Center integration: `backend/core/connections.py` (`execution` section)
 - Runtime wiring: `backend/core/runtime.py`
 - Test adapters: `backend/testing/execution.py` (never imported by the runtime)
-- Tests: `backend/tests/test_execution_connections.py`
+- Tests: `backend/tests/test_execution_connections.py`,
+  `backend/tests/test_pipeline.py` (pipeline/manager proof)
 - Frontend card: `frontend/src/ConnectionsPanel.tsx` ("Execution provider")
 
 ## Flow
@@ -33,21 +35,26 @@ Client connection credentials/details
   -> connection state + capabilities, reported by the Connection Center
 ```
 
-What actually executes orders in this Phase 6 build:
+What actually executes orders in this build (Phase 7):
 
 ```
 signal / strategy / scan
-  -> RiskEngine (unchanged, always upstream)
+  -> ExecutionIntent (backend/pipeline/models.py)
   -> PaperTradingEngine.submit_decision
-  -> ExecutionRouter
-  -> LocalPaperAdapter          <- the only production-wired adapter
+  -> TradingPipeline (backend/pipeline/service.py)
+       -> ConnectionManager resolve + verify   <- readiness evidence, fail closed
+       -> RiskEngine
+       -> ExecutionSafetyGate
+       -> execution mode + capability checks
+       -> connections.adapter_for(id).place_order(...)   <- the only order call
+  -> normalized PipelineResult -> booked paper trade
 ```
 
-The framework *prepares* adapter routing (`ConnectionManager.adapter_for()` returns the verified
-adapter for a connection), but the production order path is **not yet switched over to it**:
-`ExecutionRouter` is still bound to the local paper adapter, and only the state/readiness layer
-reads the manager. Routing orders through the selected verified connection is planned for a later
-phase.
+The framework *is* the order path now: `ConnectionManager.adapter_for()` returns the verified
+adapter the pipeline submits through, and the runtime shares one manager between the Connection
+Center and the paper engine — the state the dashboard reports is the state orders travelled.
+`ExecutionRouter` remains available as a composable utility but is no longer on the production
+order path. See `docs/PIPELINE.md` for the step order and the deterministic rejection codes.
 
 No strategy, signal source, AI advisory, TradingView alert, or market-data provider ever learns a
 broker's name; everything downstream of risk consumes `TradingPlatformAdapter` only.
@@ -131,11 +138,13 @@ owner action) and has its own manual latch. A connection can be `CONNECTED` with
 GRANTED` and still be `ready: false` because live mode is locked — configuration can never widen a
 safety gate. `GET /api/readiness` reports `live_mode: LOCKED`.
 
-The gate is consulted when a connection's readiness is computed and when the gate state is
-reported. Direct order-path enforcement — checking the gate at order submission and routing the
-order through the selected verified connection — is planned for a later phase. It cannot be
-bypassed today because the order path reaches only the local paper adapter, no live adapter
-exists, and `RiskEngine` (including its kill switch) sits in front of every execution call.
+The gate is consulted when a connection's readiness is computed, when the gate state is
+reported, and on **every order submission**: `TradingPipeline` authorizes the execution mode
+before it evaluates risk and again before it hands the order to the adapter, so an engaged kill
+switch or a locked LIVE mode rejects with `KILL_SWITCH` / `SAFETY_REJECTED` before any provider
+is touched (`docs/PIPELINE.md`). It cannot be bypassed because the order path reaches only
+through that pipeline, no live adapter exists, and `RiskEngine` (including its kill switch) sits
+inside every execution call.
 
 ## Orders
 

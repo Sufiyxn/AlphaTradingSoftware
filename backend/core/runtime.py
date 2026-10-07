@@ -87,8 +87,12 @@ class ApplicationRuntime:
                     {"ALPACA_API_KEY": broker.api_key,
                      "ALPACA_API_SECRET": broker.api_secret},
                     source="process environment"))
-        self.paper = PaperTradingEngine(self.risk, self.portfolio, self.execution,
-                                        journal=self.repository, clock=self.clock)
+        # The paper engine shares this ConnectionManager, so its orders travel
+        # the same verification the Connection Center reports.
+        self.paper = PaperTradingEngine(self.risk, self.portfolio,
+                                        journal=self.repository, clock=self.clock,
+                                        connection_manager=self.connection_manager,
+                                        connection_id="paper")
         self.valuation = PositionValuationService(
             self.market_data_bridge, self.portfolio, self.paper, journal=self.repository)
         self.reconciliation = reconcile_journal(

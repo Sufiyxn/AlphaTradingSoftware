@@ -7,6 +7,7 @@ from backend.ai import AIAnalysisService
 from backend.database import JournalRepository
 from backend.market_data import DataValidationError, MarketDataProviderError, MarketDataService
 from backend.paper_trading import PaperTradingEngine
+from backend.pipeline import ExecutionIntent
 from backend.portfolio import Portfolio
 from backend.risk import RiskEngine
 from backend.scanner import MarketScanner
@@ -238,21 +239,23 @@ class TradingOrchestrator:
                         self._record_error(f"{symbol}: advisory AI analysis unavailable: {error}", symbol=symbol)
                 if self._halted():
                     break
-                decision = self.risk_engine.evaluate(setup, self.portfolio.snapshot())
-                self._journal_call("record_risk_decision", decision)
-                if not decision.approved:
-                    rejected += 1
-                    with self._lock:
-                        self._risk_rejected += 1
-                    continue
+                # One canonical path: the TradingPipeline evaluates risk
+                # against the live portfolio, enforces the execution safety
+                # gate and the verified connection, and submits through the
+                # selected adapter. The orchestrator only reads the outcome.
+                intent = ExecutionIntent(setup=setup, source="orchestrator")
                 with self._lock:
                     if self._emergency_stopped or self._terminated or self._status is OrchestratorStatus.PAUSED:
                         break
-                    result = self.paper_trading.submit_decision(decision, analysis=analysis)
+                    result = self.paper_trading.submit_decision(intent, analysis=analysis)
                 if result.accepted and result.trade is not None:
                     approved.append(result.trade)
                     with self._lock:
                         self._approved += 1
+                elif result.risk is not None and not result.risk.approved:
+                    rejected += 1
+                    with self._lock:
+                        self._risk_rejected += 1
                 elif result.order is not None:
                     rejected += 1
                     reason = f": {result.order.rejection_reason}" if result.order.rejection_reason else ""
@@ -261,8 +264,10 @@ class TradingOrchestrator:
                     self._record_error(message)
                 else:
                     rejected += 1
-                    with self._lock:
-                        self._risk_rejected += 1
+                    detail = f": {result.reason}" if result.reason else ""
+                    message = f"{symbol}: execution pipeline rejected the submission ({result.code}{detail})"
+                    errors.append(message)
+                    self._record_error(message)
             except (DataValidationError, MarketDataProviderError, ValueError) as error:
                 rejected += 1
                 message = f"{symbol}: candidate processing failed: {error}"

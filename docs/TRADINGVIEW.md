@@ -1,18 +1,20 @@
 # TradingView Integration (Phase 4)
 
 TradingView alerts are accepted at a dedicated local webhook, authenticated with their own
-shared secret, validated and normalized, checked for duplicates, then handed to the existing
-risk and paper-execution path. TradingView is a **signal source only**: it is not a broker,
-not a market-data provider, and not a price source.
+shared secret, validated and normalized, checked for duplicates, then handed to the canonical
+trading pipeline (`docs/PIPELINE.md`). TradingView is a **signal source only**: it is not a
+broker, not a market-data provider, and not a price source.
 
 - Endpoint: `POST /api/webhooks/tradingview` (loopback only, no owner token required)
 - Code: `backend/tradingview/` (auth, payload, service) and `backend/signals/` (normalized
   signal layer)
 - Tests: `backend/tests/test_tradingview_webhook.py`
 
-There is **no direct TradingView → broker execution**. Every accepted entry goes through
-`RiskEngine.evaluate()` and then the existing paper execution abstraction; nothing can bypass
-risk or execution controls.
+There is **no direct TradingView → broker execution**. Every accepted entry becomes an
+`ExecutionIntent` (with the signal's timestamp, age limit, quantity cap, and `signal_id` as the
+idempotency key) and travels `TradingPipeline`: connection verification, `RiskEngine.evaluate()`,
+the execution safety gate, and the verified adapter. Nothing can bypass risk or execution
+controls; the webhook's HTTP contract (below) is a mapping of pipeline outcomes.
 
 ## Enable it
 

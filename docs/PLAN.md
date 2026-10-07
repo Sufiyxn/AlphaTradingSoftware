@@ -1,8 +1,9 @@
 # Alpha Trading Platform — Binding 24-Phase Roadmap
 
-> **Approved.** Phases 1–6 are complete and verified. Phase 6 — *Connection & Execution Provider
+> **Approved.** Phases 1–7 are complete and verified. Phase 6 — *Connection & Execution Provider
 > Framework* — is **committed at its checkpoint**: the framework, tests, frontend card, and docs are
-> verified and committed. Phases 7–24 are
+> verified and committed. Phase 7 — *Canonical Trading Pipeline* — is verified with Phase 7 changes
+> **left uncommitted** pending review. Phases 8–24 are
 > binding scope.
 > **Do not start, reorder, or collapse phases without explicit approval.** Each phase ends only
 > after the verification protocol below passes with exact numbers reported.
@@ -16,7 +17,16 @@
 > implemented and verified (314 passed, 102 subtests) and committed as
 > `Complete phase 6 execution provider framework`. It ships one implemented provider — the
 > in-process `local_paper` account — plus honestly advertised, deliberately unimplemented external
-> providers (`alpaca`, `robinhood`). **Phase 7 has not started.***
+> providers (`alpaca`, `robinhood`).*
+>
+> *Phase 7 checkpoint: the canonical `TradingPipeline` described below is implemented and verified
+> (327 passed, 121 subtests; `tsc --noEmit` clean; `npm run build` succeeds; HTTP smoke passed with
+> a signed webhook travelling ConnectionManager → RiskEngine → ExecutionSafetyGate → verified
+> adapter → position, and 1 order / 1 risk decision row in the journal) and is **complete but left
+> uncommitted** pending review. TradingView, the orchestrator, and the paper engine all enter
+> through `PaperTradingEngine.submit_decision`; no production file outside `backend/execution/`
+> and `backend/pipeline/` calls `place_order` (enforced by `backend/tests/test_pipeline.py`).
+> **Phase 8 has not started.***
 
 ---
 
@@ -47,8 +57,12 @@
    ```
 
    The frontend, TradingView, AI, and individual providers must never bypass this architecture.
-   Until Phase 7 lands, every new signal path must still pass `RiskEngine` before execution —
-   and that requirement never expires.
+   Phase 7 delivered this as `backend/pipeline/` (`TradingPipeline`): every signal path —
+   TradingView, the orchestrator, and the paper engine — enters through
+   `PaperTradingEngine.submit_decision` with an `ExecutionIntent` (or a pre-approved
+   `RiskDecision`), and no production file outside `backend/execution/` and `backend/pipeline/`
+   may call `place_order` — enforced by `backend/tests/test_pipeline.py`. Every signal path must
+   still pass `RiskEngine` before execution — and that requirement never expires.
 3. **Risk floors are not tunable downward.** `min_reward_risk >= 2.0`
    (`backend/strategies/models.py:34`, `backend/risk/config.py:25`),
    `qualification_win_rate >= 0.51` (`backend/backtesting/config.py:33`),
@@ -224,7 +238,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 4 | TradingView Integration | **DONE** |
 | 5 | Real Market-Data Providers | **DONE** |
 | 6 | Connection & Execution Provider Framework | **DONE** |
-| 7 | Canonical Trading Pipeline | pending |
+| 7 | Canonical Trading Pipeline | **DONE** (verified, uncommitted) |
 | 8 | Risk Hardening | pending |
 | 9 | Order Lifecycle Management & Reconciliation | pending |
 | 10 | First-Class Position Management | pending |
@@ -243,9 +257,10 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 23 | Testing / Dependencies / CI | pending |
 | 24 | Final Integration / Production Readiness | pending |
 
-> The completed sequence 1–6 is fixed (Phase 6 is committed at its checkpoint). Phases 7–24
+> The completed sequence 1–7 is fixed (Phase 6 is committed at its checkpoint; Phase 7 is
+> verified and **uncommitted**). Phases 8–24
 > are all **pending**; their internal order may be refined only by an explicit, approved
-> documentation update. **Phase 7 must not begin without explicit approval.**
+> documentation update. **Phase 8 must not begin without explicit approval.**
 
 ---
 
@@ -373,7 +388,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 
 ---
 
-## Phase 6 (committed) and future phases (not started)
+## Phase 6 (committed), Phase 7 (complete, uncommitted), and future phases (not started)
 
 ### PHASE 6 — Connection & Execution Provider Framework · **DONE (COMMITTED)**
 
@@ -405,8 +420,37 @@ Delivered scope (was the future-phase scope below):
 - extensibility: adding a provider must not require modifying the core trading strategy/decision
   engine; if automatic provider identification is impossible, the UI asks the client to identify it
 
-### PHASE 7 — Canonical Trading Pipeline
-- Establish canonical `TradingPipeline`; normalize/validate signals;
+### PHASE 7 — Canonical Trading Pipeline · **DONE (UNCOMMITTED)**
+
+> Implemented and verified (327 passed, 121 subtests; `tsc --noEmit` clean; `npm run build`
+> succeeds; HTTP smoke passed) and deliberately **left uncommitted** pending review. Full detail:
+> `docs/PIPELINE.md`.
+
+Delivered scope (was the future-phase scope below):
+
+- canonical `TradingPipeline` (`backend/pipeline/`): validate → signal freshness → resolve and
+  verify the connection through `ConnectionManager` → `RiskEngine` (with the signal's quantity
+  cap, never widened) → `ExecutionSafetyGate` → execution mode + capability checks → submit
+  through the verified adapter → normalize the provider status → journal → one normalized
+  `PipelineResult`
+- one deterministic outcome code per request from `PipelineCode` (16 codes, all exercised by
+  `backend/tests/test_pipeline.py`): `ACCEPTED`, `INVALID_REQUEST`, `STALE_SIGNAL`,
+  `DUPLICATE_INTENT`, `RISK_REJECTED`, `KILL_SWITCH`, `SAFETY_REJECTED`, `CONNECTION_NOT_FOUND`,
+  `CONNECTION_NOT_READY`, `CAPABILITY_UNAVAILABLE`, `UNSUPPORTED_MODE`, `PROVIDER_UNAVAILABLE`,
+  `PROVIDER_AUTH_FAILURE`, `PROVIDER_TIMEOUT`, `PROVIDER_RATE_LIMIT`,
+  `PROVIDER_EXECUTION_REJECTION`
+- idempotency: at most one order per key in a bounded window; a duplicate never submits and
+  never books twice
+- all three signal paths enter through `PaperTradingEngine.submit_decision` with an
+  `ExecutionIntent` (TradingView with freshness + quantity cap + `signal_id`, the orchestrator
+  with scanner setups, paper tests with pre-approved `RiskDecision`s) — risk is evaluated exactly
+  once, inside the pipeline, and journaled exactly once
+- the runtime shares one `ConnectionManager` between the Connection Center and order routing;
+  swapping a connection's adapter invalidates its verification evidence and the pipeline
+  re-verifies before any order (`ConnectionManager.set_adapter`)
+- no-bypass enforcement: no production file outside `backend/execution/` and `backend/pipeline/`
+  calls `place_order`, and neither signal service calls `RiskEngine.evaluate` directly
+- original scope, as approved: establish canonical `TradingPipeline`; normalize/validate signals;
   Strategy → AI advisory → Risk → Portfolio Rules → Execution Router; mode-aware execution; remove
   duplicate orchestration paths; broker/provider agnostic; ensure no component can bypass
   risk/execution controls.

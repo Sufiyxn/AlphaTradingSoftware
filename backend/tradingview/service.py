@@ -7,8 +7,8 @@ Request path (fail closed at every step)::
         -> payload decode with a hard size limit
         -> field validation and normalization (backend.signals)
         -> deterministic duplicate / replay check
-        -> RiskEngine decision
-        -> existing execution abstraction -> paper position
+        -> canonical TradingPipeline: connection verification, RiskEngine,
+           execution safety gate, selected adapter, normalized result
 
 The endpoint never requires the owner token, never logs or returns the webhook
 secret, never fabricates a price, and never writes the alert price into the
@@ -18,10 +18,11 @@ broker, not a market-data provider, and not a price source.
 import json
 import logging
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from backend.pipeline import ExecutionIntent, PipelineCode
 from backend.signals import (
     NormalizedSignal,
     SignalAction,
@@ -227,23 +228,38 @@ class TradingViewWebhookService:
                 f"maximum candidate price {self.max_candidate_price:g}",
                 reason="PRICE_LIMIT_EXCEEDED")
 
-        decision = self.risk.evaluate(setup, self.portfolio.snapshot())
-        if decision.approved and signal.quantity and decision.quantity > signal.quantity:
-            # The alert may ask for a smaller size than risk sizing allows; the
-            # risk decision is only ever reduced, never widened.
-            decision = replace(decision, quantity=signal.quantity,
-                               risk_amount=abs(setup.entry_price - setup.stop_price) * signal.quantity)
-        self._journal_risk(decision)
-        if not decision.approved:
+        # One canonical path: the TradingPipeline validates the intent, checks
+        # freshness, resolves and verifies the connection, evaluates risk
+        # (reducing the size to the alert's quantity when the alert asks for
+        # less), enforces the execution safety gate, and submits through the
+        # selected adapter. This service only maps the outcome back onto the
+        # webhook's stable HTTP contract.
+        intent = ExecutionIntent(
+            setup=setup, source=SOURCE, signal_id=signal.signal_id,
+            occurred_at=signal.timestamp,
+            max_age_seconds=float(self.settings.max_signal_age_seconds),
+            requested_quantity=signal.quantity,
+            idempotency_key=signal.signal_id)
+        result = self.paper.submit_decision(intent)
+        if result.code == PipelineCode.STALE_SIGNAL:
+            raise WebhookError(
+                400, "INVALID_PAYLOAD",
+                result.reason or "the signal timestamp is too old",
+                remember=True, reason="STALE_TIMESTAMP")
+        if result.code == PipelineCode.INVALID_REQUEST:
+            raise WebhookError(
+                400, "INVALID_PAYLOAD",
+                result.reason or "the execution request is invalid",
+                remember=True, reason="INVALID_PAYLOAD")
+        if result.risk is not None and not result.risk.approved:
             raise WebhookError(
                 422, "RISK_REJECTED",
                 "the signal was rejected by the risk engine",
-                remember=True, reasons=list(decision.reasons))
-
-        result = self.paper.submit_decision(decision)
+                remember=True, reasons=list(result.risk.reasons))
         if not result.accepted or result.trade is None:
             order = result.order
-            detail = f"{order.status.value}" if order is not None else "no order was placed"
+            detail = f"{order.status.value}" if order is not None else (
+                result.reason or "no order was placed")
             if order is not None and order.rejection_reason:
                 detail = f"{detail}: {order.rejection_reason}"
             raise WebhookError(
@@ -348,14 +364,6 @@ class TradingViewWebhookService:
                                       symbol=symbol, context=context)
         except Exception:
             logger.exception("Unable to persist webhook event %s", event_type)
-
-    def _journal_risk(self, decision) -> None:
-        if self.journal is None:
-            return
-        try:
-            self.journal.record_risk_decision(decision)
-        except Exception:
-            logger.exception("Unable to persist webhook risk decision")
 
     def _journal_error(self, message: str) -> None:
         if self.journal is None:

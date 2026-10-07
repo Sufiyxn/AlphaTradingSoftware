@@ -151,6 +151,20 @@ class ConnectionManager:
         with self._lock:
             return self._adapters.get(connection_id)
 
+    def set_adapter(self, connection_id: str, adapter: object) -> None:
+        """Replace the adapter behind an existing connection.
+
+        Verification evidence always described the previous instance, so it is
+        dropped here; the connection reports CONFIGURED until the pipeline's
+        next verification re-establishes honest readiness for the new adapter.
+        """
+        record = self.get(connection_id)
+        with self._lock:
+            self._adapters[connection_id] = adapter
+        record.invalidate(
+            "the execution adapter was replaced and has not been verified yet",
+            at=self._clock())
+
     # ------------------------------------------------------------ verification
     def verify(self, connection_id: str) -> ReadinessResult:
         """Run the full verification lifecycle and record honest evidence."""

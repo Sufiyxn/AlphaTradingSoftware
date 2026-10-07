@@ -224,6 +224,33 @@ class ConnectionRecord:
             self.last_error = None
             self.last_error_at = None
 
+    def invalidate(self, reason: str, *, at: datetime) -> None:
+        """Drop verification evidence that described a different adapter.
+
+        Called when the adapter behind this connection is replaced: every
+        recorded success belonged to the previous instance, so the connection
+        falls back to CONFIGURED until a fresh verification runs.
+        """
+        with self._lock:
+            self.state = (ConnectionState.CONFIGURED if self.configured
+                          else ConnectionState.NOT_CONFIGURED)
+            self.reason = reason
+            self.authentication = (AuthenticationState.UNVERIFIED if self.configured
+                                   else AuthenticationState.NOT_CONFIGURED)
+            self.authentication_reason = reason
+            self.account_state = AccountVerificationState.UNKNOWN
+            self.account_reason = None
+            self.permission = PermissionState.UNKNOWN
+            self.permission_reason = None
+            self.capabilities = ()
+            self.capability_limitations = ()
+            self.health = None
+            self.last_verified_at = None
+            self.last_success_at = None
+            self.last_error_at = at
+            self.last_error = reason
+            self.last_readiness = None
+
     def current_state(self) -> tuple[ConnectionState, str | None]:
         """Recorded state, downgrading expired success evidence to ``STALE``."""
         with self._lock:
