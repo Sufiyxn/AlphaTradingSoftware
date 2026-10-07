@@ -1,15 +1,22 @@
 # Alpha Trading Platform — Binding 24-Phase Roadmap
 
-> **Approved.** Phases 1–5 are complete and verified. Phase 6 — *Connection & Execution Provider
-> Framework* — is **NOT STARTED** and must not begin without explicit approval. Phases 6–24 are
+> **Approved.** Phases 1–6 are complete and verified. Phase 6 — *Connection & Execution Provider
+> Framework* — is **committed at its checkpoint**: the framework, tests, frontend card, and docs are
+> verified and committed. Phases 7–24 are
 > binding scope.
 > **Do not start, reorder, or collapse phases without explicit approval.** Each phase ends only
 > after the verification protocol below passes with exact numbers reported.
 >
 > *Documentation-only checkpoint update (post-Phase 5): Phase 5 is recorded as DONE, Phase 6 is
-> renamed/reframed as the provider-agnostic "Connection & Execution Provider Framework" and stays
+> renamed/reframed as the provider-agnostic "Connection & Execution Provider Framework" and stayed
 > NOT STARTED, and the pending phases were renumbered/expanded to cover the autonomous end goal.
-> No Phase 5 or TradingView implementation code was changed by this update.*
+> No Phase 5 or TradingView implementation code was changed by that update.*
+>
+> *Phase 6 checkpoint: the provider-agnostic connection/execution framework described below is
+> implemented and verified (314 passed, 102 subtests) and committed as
+> `Complete phase 6 execution provider framework`. It ships one implemented provider — the
+> in-process `local_paper` account — plus honestly advertised, deliberately unimplemented external
+> providers (`alpaca`, `robinhood`). **Phase 7 has not started.***
 
 ---
 
@@ -114,7 +121,7 @@ another, and no decision or execution shortcut may join them directly.
 |---|---|---|
 | **Market data providers** | Polygon, Alpha Vantage, future providers | Continuous, real pricing/history for scanning, valuation, marking, backtesting. Phases 3–5. |
 | **Signal / analysis sources** | TradingView, internal strategies, future signal sources, AI advisory | Produce signals, setups, and advisory input. Nothing in this row executes an order. |
-| **Execution providers** | Robinhood, Alpaca, future brokers/trading platforms | Submit/cancel/modify orders and report fills **through a standardized internal execution interface**, only after `RiskEngine`. Not built yet (Phase 6). |
+| **Execution providers** | Robinhood, Alpaca, future brokers/trading platforms | Submit/cancel/modify orders and report fills **through a standardized internal execution interface**, only after `RiskEngine`. Framework in place (Phase 6); no external provider adapter is installed yet. |
 
 Forbidden couplings — architectural, permanent:
 
@@ -125,7 +132,7 @@ Forbidden couplings — architectural, permanent:
 
 `RiskEngine` remains between decision generation and execution in every path.
 
-### Execution is provider-agnostic (Phase 6 shape — documented, not implemented)
+### Execution is provider-agnostic (Phase 6 shape — framework implemented, external adapters not installed)
 
 The platform must **not** be designed around Robinhood, Alpaca, or any single broker. Clients use
 many different trading platforms/providers; the client supplies their own connection details and
@@ -216,7 +223,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 3 | Real Market-Data Bridge + Paper Position Lifecycle | **DONE** |
 | 4 | TradingView Integration | **DONE** |
 | 5 | Real Market-Data Providers | **DONE** |
-| 6 | Connection & Execution Provider Framework | **NOT STARTED** |
+| 6 | Connection & Execution Provider Framework | **DONE** |
 | 7 | Canonical Trading Pipeline | pending |
 | 8 | Risk Hardening | pending |
 | 9 | Order Lifecycle Management & Reconciliation | pending |
@@ -236,9 +243,9 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 23 | Testing / Dependencies / CI | pending |
 | 24 | Final Integration / Production Readiness | pending |
 
-> The completed sequence 1–5 is fixed. Phases 6–24 are all **pending**; their internal order may be
-> refined only by an explicit, approved documentation update. **Phase 6 is the next phase and must
-> remain NOT STARTED until explicitly approved.**
+> The completed sequence 1–6 is fixed (Phase 6 is committed at its checkpoint). Phases 7–24
+> are all **pending**; their internal order may be refined only by an explicit, approved
+> documentation update. **Phase 7 must not begin without explicit approval.**
 
 ---
 
@@ -366,16 +373,16 @@ paper-trading simulator. Those are components/stages of the larger system.
 
 ---
 
-## Future phases (none started)
+## Phase 6 (committed) and future phases (not started)
 
-### PHASE 6 — Connection & Execution Provider Framework · **NOT STARTED**
+### PHASE 6 — Connection & Execution Provider Framework · **DONE (COMMITTED)**
 
-> Documentation-only checkpoint: this scope is recorded, not implemented. Do not begin without
-> explicit approval. This phase is **not** an "Alpaca integration phase" — it is the
-> broker/provider-agnostic framework; Alpaca and Robinhood are example providers a client may
-> connect.
+> Implemented and verified (314 passed, 102 subtests), committed as
+> `Complete phase 6 execution provider framework`. This phase is **not** an "Alpaca integration
+> phase" — it is the broker/provider-agnostic framework; Alpaca and Robinhood are example
+> providers a client may connect, and both are advertised here as *not installed*.
 
-Scope the future phase must eventually cover:
+Delivered scope (was the future-phase scope below):
 
 - client-provided credentials/connection details and secure credential handling (secrets never
   exposed, logged, or committed)

@@ -13,8 +13,11 @@ from pathlib import Path
 from backend.admin import LocalOwnerAuthenticator, OwnerControlPlane
 from backend.ai import AIAnalysisService, LocalRuleBasedAnalysisProvider
 from backend.config import Config, load_config
+from backend.connections import ConnectionManager, CredentialHandle, default_execution_providers
 from backend.database import SQLiteJournalRepository
-from backend.execution import AdapterRegistry, ExecutionRouter, LocalPaperAdapter
+from backend.execution import (
+    AdapterRegistry, ExecutionMode, ExecutionRouter, ExecutionSafetyGate, LocalPaperAdapter,
+)
 from backend.market_data import MarketDataBridge, MarketDataService, build_market_data_provider
 from backend.market_data.session import NEW_YORK, market_session
 from backend.orchestrator import OrchestratorConfig, TradingOrchestrator
@@ -55,6 +58,35 @@ class ApplicationRuntime:
         self.paper_adapter = LocalPaperAdapter(cash=trading.paper_starting_cash, clock=self.clock)
         self.registry.register(self.paper_adapter, self.paper_adapter.identify())
         self.execution = ExecutionRouter(self.registry, self.paper_adapter.identify(), clock=self.clock)
+        # Provider-agnostic execution connections: the local paper account is
+        # verified in-process; a client-configured external provider starts
+        # CONFIGURED and only ever reports CONNECTED after a real verification.
+        self.execution_gate = ExecutionSafetyGate(
+            kill_switch=lambda: self.risk.kill_switch_enabled,
+            live_enabled=lambda: self.config.trading.selection.live_intent,
+        )
+        self.execution_providers = default_execution_providers()
+        self.connection_manager = ConnectionManager(
+            registry=self.execution_providers, clock=self.clock,
+            gate=self.execution_gate,
+            factory_kwargs={"cash": trading.paper_starting_cash},
+        )
+        self.connection_manager.add(
+            connection_id="paper", provider_id="local_paper",
+            label="Local paper account", mode=ExecutionMode.PAPER,
+            environment="PAPER", adapter=self.paper_adapter)
+        broker = self.config.broker
+        if broker.provider and broker.provider != "none":
+            self.connection_manager.add(
+                connection_id="client", provider_id=broker.provider,
+                label=broker.describe()["label"],
+                mode=(ExecutionMode.LIVE if broker.environment == "LIVE"
+                      else ExecutionMode.PAPER),
+                environment=broker.environment,
+                credentials=CredentialHandle(
+                    {"ALPACA_API_KEY": broker.api_key,
+                     "ALPACA_API_SECRET": broker.api_secret},
+                    source="process environment"))
         self.paper = PaperTradingEngine(self.risk, self.portfolio, self.execution,
                                         journal=self.repository, clock=self.clock)
         self.valuation = PositionValuationService(
@@ -112,6 +144,7 @@ class ApplicationRuntime:
             repository=self.repository, market_data_availability=self.valuation.availability,
             tradingview_status=self.tradingview.connection_state,
             tradingview_check=self.tradingview.self_check,
+            execution_connections=self.connection_manager,
         )
         self._report_stop = threading.Event()
         self._report_thread = threading.Thread(target=self._schedule_reports, name="alpha-daily-report", daemon=True)

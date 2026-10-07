@@ -8,11 +8,73 @@ from backend.strategies.models import Direction
 
 
 class OrderStatus(str, Enum):
+    """Normalized order state. Provider words are mapped by
+    :func:`normalize_order_status`; anything unrecognized becomes ``UNKNOWN``
+    instead of an invented status."""
+
     PENDING = "PENDING"
+    SUBMITTED = "SUBMITTED"
+    ACCEPTED = "ACCEPTED"
     FILLED = "FILLED"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+
+
+_STATUS_SYNONYMS: dict[str, OrderStatus] = {
+    "pending": OrderStatus.PENDING,
+    "received": OrderStatus.PENDING,
+    "initialized": OrderStatus.PENDING,
+    "created": OrderStatus.PENDING,
+    "unacknowledged": OrderStatus.PENDING,
+    "submitted": OrderStatus.SUBMITTED,
+    "sent": OrderStatus.SUBMITTED,
+    "queued": OrderStatus.SUBMITTED,
+    "transmitted": OrderStatus.SUBMITTED,
+    "accepted": OrderStatus.ACCEPTED,
+    "acknowledged": OrderStatus.ACCEPTED,
+    "new": OrderStatus.ACCEPTED,
+    "open": OrderStatus.ACCEPTED,
+    "live": OrderStatus.ACCEPTED,
+    "active": OrderStatus.ACCEPTED,
+    "working": OrderStatus.ACCEPTED,
+    "partially_filled": OrderStatus.PARTIALLY_FILLED,
+    "partiallyfilled": OrderStatus.PARTIALLY_FILLED,
+    "partial_fill": OrderStatus.PARTIALLY_FILLED,
+    "partial": OrderStatus.PARTIALLY_FILLED,
+    "filled": OrderStatus.FILLED,
+    "complete": OrderStatus.FILLED,
+    "completed": OrderStatus.FILLED,
+    "executed": OrderStatus.FILLED,
+    "rejected": OrderStatus.REJECTED,
+    "refused": OrderStatus.REJECTED,
+    "denied": OrderStatus.REJECTED,
+    "cancelled": OrderStatus.CANCELLED,
+    "canceled": OrderStatus.CANCELLED,
+    "user_cancelled": OrderStatus.CANCELLED,
+    "user_canceled": OrderStatus.CANCELLED,
+    "expired": OrderStatus.EXPIRED,
+    "expiration": OrderStatus.EXPIRED,
+    "failed": OrderStatus.FAILED,
+    "failure": OrderStatus.FAILED,
+    "error": OrderStatus.FAILED,
+}
+
+
+def normalize_order_status(value: object) -> OrderStatus:
+    """Map a provider's status word onto the normalized vocabulary.
+
+    Unknown, empty, or non-text input becomes ``UNKNOWN`` - the caller learns
+    that the state is not confirmed rather than receiving a fabricated status.
+    """
+    if isinstance(value, OrderStatus):
+        return value
+    text = str(value if value is not None else "").strip().lower()
+    text = text.replace("-", "_").replace(" ", "_")
+    return _STATUS_SYNONYMS.get(text, OrderStatus.UNKNOWN)
 
 
 class OrderType(str, Enum):
@@ -38,6 +100,17 @@ class MarketSession(str, Enum):
     REGULAR = "REGULAR"
     AFTER_HOURS = "AFTER_HOURS"
     CLOSED = "CLOSED"
+
+
+class ExecutionMode(str, Enum):
+    """Strict paper/live boundary for a connection or an order intent.
+
+    Configuration and credentials never grant ``LIVE``; the execution safety
+    gate decides whether LIVE is authorizable at all.
+    """
+
+    PAPER = "PAPER"
+    LIVE = "LIVE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +143,23 @@ class OrderRequest:
     fractional: bool = False
     extended_hours: bool = False
     stop_price: float | None = None
+    time_in_force: str = "DAY"
+    execution_mode: ExecutionMode = ExecutionMode.PAPER
+
+    def __post_init__(self) -> None:
+        time_in_force = str(self.time_in_force or "").strip().upper()
+        if not time_in_force:
+            raise ValueError("time_in_force must not be empty")
+        object.__setattr__(self, "time_in_force", time_in_force)
+        if not isinstance(self.execution_mode, ExecutionMode):
+            try:
+                object.__setattr__(self, "execution_mode",
+                                   ExecutionMode(str(self.execution_mode).strip().upper()))
+            except ValueError:
+                raise ValueError(
+                    f"unsupported execution mode {self.execution_mode!r}; "
+                    f"expected one of {', '.join(item.value for item in ExecutionMode)}"
+                ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +180,10 @@ class Order:
     created_at: datetime
     fills: tuple[Fill, ...] = ()
     rejection_reason: str | None = None
+    # Provider-side identity and update time. ``provider_reference`` stays
+    # None when no external provider reference exists - it is never invented.
+    provider_reference: str | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

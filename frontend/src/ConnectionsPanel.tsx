@@ -19,8 +19,19 @@ type Section = {
     last_success_at?: string | null; last_error?: string | null
     rate_limited_until?: string | null
   }
+  count?: number; ready_count?: number
+  connections?: ExecutionConnection[]
+  providers?: ExecutionProvider[]
+  gate?: ExecutionGate
 }
-type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; tradingview: Section }
+type ExecutionConnection = {
+  connection_id?: string; provider_id?: string; label?: string; mode?: string
+  state?: string; reason?: string | null; ready?: boolean; configured?: boolean
+  implemented?: boolean; capabilities?: string[]; capability_limitations?: string[]
+}
+type ExecutionProvider = { provider_id?: string; label?: string; implemented?: boolean; supported_modes?: string[] }
+type ExecutionGate = { paper_allowed?: boolean; live_allowed?: boolean; kill_switch_engaged?: boolean; manual_stop_engaged?: boolean }
+type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; tradingview: Section; execution_connections: Section }
 type Check = { key: string; label: string; status: string; passed: boolean; detail: string }
 type Readiness = { status: string; live_mode: string; checks: Check[]; blockers: string[]; performance_qualification: string; measured_win_rate: number; evaluation_trades: number }
 
@@ -72,6 +83,9 @@ export default function ConnectionsPanel({ token }: { token: string }) {
       <ConnectionCard title="TradingView" section="tradingview" data={connections?.tradingview} pending={pending} onTest={test} fields={[
         ['Endpoint', connections?.tradingview.endpoint], ['Role', connections?.tradingview.role], ['Enabled', connections?.tradingview.enabled ? 'Yes' : 'No'], ['Secret configured', fieldState(connections?.tradingview.secret_configured)], ['State', connections?.tradingview.state], ['State detail', connections?.tradingview.reason ?? 'None'], ['Signals', `${connections?.tradingview.signals_accepted ?? 0} accepted · ${connections?.tradingview.signals_rejected ?? 0} rejected · ${connections?.tradingview.signals_duplicate ?? 0} duplicate`], ['Strategies', (connections?.tradingview.allowed_strategies ?? []).length ? connections?.tradingview.allowed_strategies?.join(', ') : 'Any allowed strategy'], ['Last signal', connections?.tradingview.last_received_signal || 'None'],
       ]} />
+      <ConnectionCard title="Execution provider" section="execution" data={connections?.execution_connections} pending={pending} onTest={test} fields={[
+        ['State', connections?.execution_connections.state], ['State detail', connections?.execution_connections.reason ?? 'None'], ['Connections', `${connections?.execution_connections.ready_count ?? 0} of ${connections?.execution_connections.count ?? 0} ready`], ['Paper trading', connections?.execution_connections.gate?.paper_allowed ? 'Available (in-process)' : 'Blocked'], ['Live trading', connections?.execution_connections.gate?.live_allowed ? 'Available' : 'Locked in this build'], ['Providers', providerList(connections?.execution_connections.providers)], ['Capabilities', capabilityList(connections?.execution_connections.connections?.flatMap((item) => item.capabilities ?? []))], ['Limitations', capabilityList(connections?.execution_connections.connections?.flatMap((item) => item.capability_limitations ?? []))],
+      ]} />
     </div>
     <div className="readiness-card"><div className="readiness-head"><div><p className="eyebrow">PRE-FLIGHT CHECKLIST</p><h3>Live readiness</h3></div><span className="locked-pill">{readiness?.live_mode ?? 'LOCKED'}</span></div>
       <p className="readiness-copy">Credentials alone cannot unlock live execution. No live adapter or activation control is installed in this version.</p>
@@ -91,7 +105,12 @@ function ConnectionCard({ title, section, data, pending, onTest, fields }: { tit
 function fieldState(configured?: boolean) { return configured ? 'Configured (hidden)' : 'Not set' }
 function capabilityList(value: unknown) {
   if (!Array.isArray(value) || !value.length) return 'None reported'
-  return value.map((item) => String(item)).join(' · ')
+  const unique = Array.from(new Set(value.map((item) => String(item))))
+  return unique.join(' · ')
+}
+function providerList(value: ExecutionProvider[] | undefined) {
+  if (!value || !value.length) return 'None reported'
+  return value.map((provider) => `${provider.label ?? provider.provider_id ?? 'unknown'}: ${provider.implemented ? 'installed' : 'not installed'}`).join(' · ')
 }
 function capabilitySummary(value: unknown) {
   if (!value || typeof value !== 'object') return 'Unavailable'

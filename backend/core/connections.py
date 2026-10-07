@@ -10,12 +10,13 @@ from backend.market_data.session import market_session
 
 
 class ConnectionCenter:
-    SECTIONS = {"market_data", "trading_platform", "ai", "notifications", "tradingview"}
+    SECTIONS = {"market_data", "trading_platform", "ai", "notifications", "tradingview",
+                "execution"}
 
     def __init__(self, *, config, market_data, universe, execution, performance, portfolio,
                  risk, notifier, owner_controls_enabled, clock, repository=None,
                  market_data_availability=None, tradingview_status=None,
-                 tradingview_check=None):
+                 tradingview_check=None, execution_connections=None):
         self.config = config
         self.market_data = market_data
         self.universe = universe
@@ -30,6 +31,7 @@ class ConnectionCenter:
         self._availability_source = market_data_availability
         self._tradingview_status = tradingview_status
         self._tradingview_check = tradingview_check
+        self.execution_connections = execution_connections
         self.last_tests: dict[str, dict] = {}
         self.last_successful: dict[str, datetime] = {}
         if repository is not None:
@@ -124,7 +126,21 @@ class ConnectionCenter:
                 "last_successful_connection": self.last_successful.get("notifications"),
             },
             "tradingview": self._tradingview_section(),
+            "execution_connections": self._execution_section(),
         }
+
+    def _execution_section(self) -> dict:
+        """Provider-agnostic execution connections, reported by the manager.
+
+        Backend-only: the dashboard never contacts a broker, and no credential
+        value is ever included here.
+        """
+        if self.execution_connections is None:
+            return {"count": 0, "configured": False, "ready": False, "ready_count": 0,
+                    "state": "NOT_CONFIGURED",
+                    "reason": "the connection manager is not attached to this runtime",
+                    "connections": [], "providers": [], "gate": None}
+        return self.execution_connections.describe()
 
     def _tradingview_section(self) -> dict:
         """Configuration plus live webhook state, never a credential value.
@@ -148,6 +164,44 @@ class ConnectionCenter:
         section["connection"] = self.last_tests.get("tradingview", _never_tested())
         section["last_successful_connection"] = self.last_successful.get("tradingview")
         return section
+
+    def _test_execution(self, tested_at: datetime) -> dict:
+        """Run the connection-manager verification for every client connection.
+
+        Local in-process checks make no network request; an external provider
+        would be contacted only when a real adapter for it exists in the build.
+        """
+        if self.execution_connections is None:
+            return _unsupported(tested_at, "the connection manager is not installed; "
+                                           "no network request was made")
+        results = self.execution_connections.verify_all()
+        if not results:
+            return _not_configured(tested_at, "no execution connection is configured; "
+                                              "no network request was made")
+        configured = [item for item in results if item.configured]
+        if not configured:
+            detail = next((item.failure_reason for item in results if item.failure_reason),
+                          "no execution connection has credentials")
+            return _not_configured(tested_at, f"{detail}; no network request was made")
+        ready = [item for item in results if item.ready]
+        parts = []
+        for item in results:
+            text = f"{item.connection_id}: {item.state}"
+            if item.failure_reason and not item.ready:
+                text = f"{text} ({item.failure_reason})"
+            parts.append(text)
+        summary = "; ".join(parts)
+        local_only = True
+        for item in results:
+            descriptor = self.execution_connections.registry.find(item.provider_id)
+            if descriptor is None or descriptor.authentication != "NONE":
+                local_only = False
+                break
+        message = f"{summary}; no network request was made" if local_only else summary
+        success = bool(ready)
+        return {"status": "PASSED" if success else "FAILED", "success": success,
+                "tested_at": tested_at, "error": None if success else message,
+                "message": message}
 
     def market_data_availability(self) -> dict:
         """Five-state availability from the market-data bridge, honest about nothing."""
@@ -216,6 +270,8 @@ class ConnectionCenter:
             else:
                 passed, detail = self._tradingview_check()
                 result = _test_result(passed, tested_at, detail)
+        elif section == "execution":
+            result = self._test_execution(tested_at)
         else:
             result = _unsupported(tested_at, "No external adapter is installed; no network request was made")
         self.last_tests[section] = result
@@ -237,6 +293,7 @@ class ConnectionCenter:
     def readiness(self) -> dict:
         configured = self.status()
         availability = self.market_data_availability()
+        execution = configured["execution_connections"]
         performance = self.performance.calculate(
             as_of=market_session(self.clock()).trading_date, portfolio=self.portfolio.snapshot())
         data_test = self.last_tests.get("market_data", {}).get("success", False)
@@ -248,6 +305,10 @@ class ConnectionCenter:
             _check("market_data_test_passed", "Market data connection tested", market_ready and data_test),
             _check("broker_configured", "Platform credentials configured", broker_ready),
             _check("broker_connection_tested", "Platform connection tested", broker_ready and broker_test),
+            _check("execution_connection_configured", "Execution connection configured",
+                   bool(execution.get("configured"))),
+            _check("execution_connection_verified", "Execution connection verified",
+                   bool(execution.get("ready"))),
             _check("account_available", "Live account available", False),
             _check("capabilities_supported", "Required live capabilities supported", False),
             _check("owner_authentication", "Owner authentication active", self.owner_controls_enabled),
@@ -274,6 +335,10 @@ class ConnectionCenter:
                 "market_data_last_quote_at": availability.get("last_quote_at"),
                 "broker_state": configured["trading_platform"]["state"],
                 "broker_reason": configured["trading_platform"]["reason"],
+                "execution_state": execution.get("state"),
+                "execution_reason": execution.get("reason"),
+                "execution_ready_count": execution.get("ready_count", 0),
+                "execution_gate": execution.get("gate"),
                 "not_configured": not_configured,
                 "performance_qualification": performance.qualification_status,
                 "measured_win_rate": performance.evaluation_win_rate,

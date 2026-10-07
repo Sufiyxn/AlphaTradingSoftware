@@ -109,6 +109,21 @@ class MockTradingPlatformAdapter:
     def get_positions(self) -> Sequence[Position]:
         return tuple(self._positions.values())
 
+    def health_check(self) -> dict:
+        """Local connectivity evidence only - this adapter owns no network."""
+        if not self._connected:
+            return {"success": False, "status": "DISCONNECTED",
+                    "detail": "the local account adapter is disconnected"}
+        return {"success": True, "status": "PASSED",
+                "detail": "local in-process account; no network request was made"}
+
+    def reconcile_orders(self, since: datetime | None = None) -> Sequence[Order]:
+        """Reconciliation hook: the orders this adapter knows about since a cut-off."""
+        orders = self.get_orders()
+        if since is None:
+            return orders
+        return tuple(order for order in orders if order.created_at >= since)
+
 
 class MockExecutionProvider(MockTradingPlatformAdapter):
     """Legacy name retained for existing paper-trading callers."""
