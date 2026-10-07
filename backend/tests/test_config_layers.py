@@ -67,15 +67,18 @@ class ConfigurationLayerTests(unittest.TestCase):
         })
         self.assertTrue(config.market_data.configured)
         self.assertEqual(config.market_data.missing_credentials, ())
-        self.assertEqual(config.market_data.state, "NOT_CONFIGURED")
-        self.assertFalse(config.market_data.available)
-        self.assertIn("not installed", config.market_data.unavailable_reason)
+        self.assertEqual(config.market_data.state, "CONFIGURED")
+        self.assertTrue(config.market_data.available)
+        self.assertIsNone(config.market_data.unavailable_reason)
         self.assertNotIn(SENTINEL, json.dumps(config.describe()))
 
     def test_unconfigured_provider_reports_missing_credential_names(self):
         config = build({"MARKET_DATA_PROVIDER": "polygon"})
         self.assertFalse(config.market_data.configured)
         self.assertEqual(config.market_data.missing_credentials, ("POLYGON_API_KEY",))
+        self.assertEqual(config.market_data.state, "NOT_CONFIGURED")
+        self.assertFalse(config.market_data.available)
+        self.assertIn("no credentials", config.market_data.unavailable_reason)
 
     def test_unknown_provider_is_never_configured(self):
         config = build({"MARKET_DATA_PROVIDER": "not-a-real-vendor"})
@@ -183,16 +186,27 @@ class ConfigurationLayerTests(unittest.TestCase):
         self.assertEqual(config.notifications.state, "CONFIGURED")
 
     def test_no_catalog_claims_an_adapter_this_build_cannot_use(self):
+        from backend.market_data.registry import IMPLEMENTED as MARKET_DATA_ADAPTERS
         in_process = {("ai", "none"), ("ai", "local"), ("notification", "local")}
         for kind, catalog in CATALOGS.items():
             for integration_id, found in catalog.items():
                 with self.subTest(kind=kind, integration_id=integration_id):
                     if (kind, integration_id) in in_process:
                         self.assertTrue(found.implemented)
+                    elif kind == "market_data":
+                        self.assertEqual(
+                            found.implemented, integration_id in MARKET_DATA_ADAPTERS,
+                            f"{kind}/{integration_id} catalog claim does not match a "
+                            "registered adapter in backend.market_data.registry")
                     else:
                         self.assertFalse(
                             found.implemented,
                             f"{kind}/{integration_id} is advertised as implemented but no adapter exists")
+        for integration_id in MARKET_DATA_ADAPTERS:
+            with self.subTest(kind="market_data", integration_id=integration_id,
+                              registered=True):
+                self.assertIn(integration_id, CATALOGS["market_data"])
+                self.assertTrue(CATALOGS["market_data"][integration_id].implemented)
 
     def test_process_environment_is_never_overwritten_by_the_env_file(self):
         with patch.dict(os.environ, {"APP_PORT": "8123"}, clear=True):

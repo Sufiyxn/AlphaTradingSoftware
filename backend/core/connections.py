@@ -63,8 +63,17 @@ class ConnectionCenter:
                 "base_url_configured": market["base_url_configured"],
                 "plan_configured": market["plan_configured"],
                 "account_id_configured": market["account_id_configured"],
-                "capabilities": market["capabilities"],
+                "capabilities": provider_state.get("capabilities") or market["capabilities"],
                 "live_provider": provider_state,
+                "connectivity": {
+                    "state": provider_state.get("state"),
+                    "reason": provider_state.get("reason"),
+                    "checked_at": provider_state.get("checked_at"),
+                    "last_success_at": provider_state.get("last_success_at"),
+                    "last_error_at": provider_state.get("last_error_at"),
+                    "last_error": provider_state.get("last_error"),
+                    "rate_limited_until": provider_state.get("rate_limited_until"),
+                },
                 "connection": self.last_tests.get("market_data", _never_tested()),
                 "last_successful_connection": self.last_successful.get("market_data"),
             },
@@ -154,9 +163,23 @@ class ConnectionCenter:
         market = self.config.market_data
         broker = self.config.broker
         if section == "market_data":
-            result = self._external_probe(
-                label="market data", provider=market.provider, configured=market.configured,
-                available=market.available, reason=market.unavailable_reason, tested_at=tested_at)
+            if not market.configured or market.provider in ("", "none"):
+                detail = market.unavailable_reason or "no market data provider is connected"
+                result = _not_configured(tested_at, f"{detail}; no network request was made")
+            elif not market.available:
+                detail = market.unavailable_reason or (
+                    f"the {market.provider} market data adapter is unavailable")
+                result = _unsupported(tested_at, f"{detail}; no network request was made")
+            else:
+                outcome = self.market_data.check()
+                message = str(outcome.get("detail") or "")
+                result = {
+                    "status": str(outcome.get("status") or "FAILED"),
+                    "success": bool(outcome.get("success")),
+                    "tested_at": tested_at,
+                    "error": None if outcome.get("success") else message,
+                    "message": message,
+                }
         elif section == "trading_platform":
             result = self._external_probe(
                 label="trading platform", provider=broker.provider, configured=broker.configured,

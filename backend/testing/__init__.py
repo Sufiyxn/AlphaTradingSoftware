@@ -8,6 +8,7 @@ generating a synthetic price, candle, quote, account, or connection state.
 from backend.execution import MockExecutionProvider, MockTradingPlatformAdapter
 from backend.scanner import TemporaryTestAnalyzer
 
+from .http import FakeResponse, FakeTransport, connection_error, timeout_error
 from .market_data import (
     FixtureHistoryProvider,
     MockMarketDataProvider,
@@ -15,10 +16,14 @@ from .market_data import (
 )
 
 __all__ = [
+    "FakeResponse",
+    "FakeTransport",
     "FixtureHistoryProvider",
     "MockExecutionProvider",
     "MockMarketDataProvider",
     "MockTradingPlatformAdapter",
     "TemporaryTestAnalyzer",
+    "connection_error",
     "fixture_history",
+    "timeout_error",
 ]

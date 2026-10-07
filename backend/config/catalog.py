@@ -33,21 +33,21 @@ MARKET_DATA_CATALOG: dict[str, IntegrationDescriptor] = {
     descriptor.id: descriptor
     for descriptor in (
         IntegrationDescriptor(
-            id="polygon", label="Polygon", kind="market_data", implemented=False,
+            id="polygon", label="Polygon", kind="market_data", implemented=True,
             required_credentials=("POLYGON_API_KEY",),
             optional_fields=("MARKET_DATA_BASE_URL", "MARKET_DATA_PLAN"),
             markets=("US_EQUITIES", "US_INDICES"),
             timeframes=("1min", "5min", "15min", "1h", "1day"),
-            capabilities=("historical_ohlcv", "previous_close", "latest_quotes", "read_only"),
+            capabilities=("historical_ohlcv", "latest_quotes", "symbol_lookup", "read_only"),
             secret_fields=("POLYGON_API_KEY",),
         ),
         IntegrationDescriptor(
-            id="alphavantage", label="Alpha Vantage", kind="market_data", implemented=False,
+            id="alphavantage", label="Alpha Vantage", kind="market_data", implemented=True,
             required_credentials=("ALPHAVANTAGE_API_KEY",),
             optional_fields=("MARKET_DATA_BASE_URL",),
             markets=("US_EQUITIES", "FX", "CRYPTO"),
             timeframes=("1min", "5min", "15min", "30min", "60min", "daily"),
-            capabilities=("historical_ohlcv", "latest_quotes", "read_only"),
+            capabilities=("historical_ohlcv", "latest_quotes", "symbol_lookup", "read_only"),
             secret_fields=("ALPHAVANTAGE_API_KEY",),
         ),
     )

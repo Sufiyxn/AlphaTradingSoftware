@@ -61,11 +61,18 @@ def normalize_bar(value: Bar | Mapping[str, Any]) -> Bar:
     return bar
 
 
+def _optional_number(value: Any, field: str) -> float | None:
+    if value is None:
+        return None
+    return _number(value, field, positive=True)
+
+
 def normalize_quote(value: Quote | Mapping[str, Any]) -> Quote:
     """Validate and normalize a latest quote from a provider."""
     try:
         fields = (
-            {name: getattr(value, name) for name in ("symbol", "timestamp", "price", "volume")}
+            {name: getattr(value, name)
+             for name in ("symbol", "timestamp", "price", "volume", "bid", "ask")}
             if isinstance(value, Quote)
             else value
         )
@@ -76,6 +83,8 @@ def normalize_quote(value: Quote | Mapping[str, Any]) -> Quote:
             timestamp=_timestamp(fields["timestamp"]),
             price=_number(fields["price"], "price", positive=True),
             volume=_number(fields["volume"], "volume"),
+            bid=_optional_number(fields.get("bid"), "bid"),
+            ask=_optional_number(fields.get("ask"), "ask"),
         )
     except KeyError as error:
         raise DataValidationError(f"missing quote field: {error.args[0]}") from error

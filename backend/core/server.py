@@ -50,7 +50,12 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 elif path == "/api/opportunities":
                     result = {"opportunities": runtime.scanner.scan(runtime.orchestrator.config.universe)}
                 elif path == "/api/quotes":
-                    result = {"quotes": runtime.market_data.get_latest(runtime.orchestrator.config.universe.symbols)}
+                    market = runtime.market_data.status
+                    result = {"provider": market.get("provider"),
+                              "state": market.get("state"),
+                              "reason": market.get("reason"),
+                              "quotes": runtime.market_data.get_latest(
+                                  runtime.orchestrator.config.universe.symbols)}
                 elif path == "/api/positions":
                     result = _positions_payload(runtime)
                 elif path == "/api/portfolio":
@@ -111,7 +116,24 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     start = end - runtime.orchestrator.config.history_lookback
                     histories = {symbol: runtime.market_data.get_historical(symbol, start, end)
                                  for symbol in runtime.orchestrator.config.universe.symbols}
-                    result = BacktestEngine().run(histories)
+                    retrieved = sum(len(bars) for bars in histories.values())
+                    if retrieved == 0:
+                        result = {
+                            "status": "NO_DATA",
+                            "reason": ("no historical bars were retrieved from the configured "
+                                       "market-data provider; no backtest was run"),
+                            "provider": runtime.market_data.status.get("provider"),
+                            "provider_state": runtime.market_data.status.get("state"),
+                            "metrics": None,
+                            "trades": [],
+                            "starting_capital": 0.0,
+                            "ending_capital": 0.0,
+                            "qualified": False,
+                            "completed": False,
+                            "errors": ("no historical market data was retrieved",),
+                        }
+                    else:
+                        result = {"status": "OK", **asdict(BacktestEngine().run(histories))}
                 else:
                     return self._send(404, {"error": "not found"})
                 self._send(200, result)

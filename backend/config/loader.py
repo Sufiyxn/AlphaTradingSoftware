@@ -246,7 +246,14 @@ def _normalise_provider(raw: str | None, *, default: str = "none") -> str:
 def _market_data_settings(env: Mapping[str, str]) -> MarketDataSettings:
     defaults = MarketDataSettings()
     provider = _normalise_provider(_get(env, "MARKET_DATA_PROVIDER"))
-    api_key = _get(env, "POLYGON_API_KEY") or _get(env, "MARKET_DATA_API_KEY")
+    provider_key = {"polygon": "POLYGON_API_KEY",
+                    "alphavantage": "ALPHAVANTAGE_API_KEY"}.get(provider)
+    if provider_key:
+        api_key = _get(env, provider_key) or _get(env, "MARKET_DATA_API_KEY")
+    else:
+        api_key = (_get(env, "POLYGON_API_KEY")
+                   or _get(env, "ALPHAVANTAGE_API_KEY")
+                   or _get(env, "MARKET_DATA_API_KEY"))
     return MarketDataSettings(
         provider=provider,
         base_url=_get(env, "MARKET_DATA_BASE_URL"),
@@ -259,6 +266,10 @@ def _market_data_settings(env: Mapping[str, str]) -> MarketDataSettings:
             _get(env, "MARKET_DATA_STALE_AFTER_SECONDS"),
             default=defaults.stale_after_seconds,
             name="MARKET_DATA_STALE_AFTER_SECONDS"),
+        timeout_seconds=parse_number(
+            _get(env, "MARKET_DATA_TIMEOUT_SECONDS"),
+            default=defaults.timeout_seconds,
+            name="MARKET_DATA_TIMEOUT_SECONDS"),
     )
 
 

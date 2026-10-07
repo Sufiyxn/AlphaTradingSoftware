@@ -13,6 +13,12 @@ type Section = {
   endpoint?: string; ready?: boolean; state?: string; reason?: string | null
   signals_accepted?: number; signals_rejected?: number; signals_duplicate?: number
   allowed_strategies?: string[]; max_signal_age_seconds?: number; stale_after_seconds?: number
+  label?: string; implemented?: boolean; missing_credentials?: string[]
+  connectivity?: {
+    state?: string | null; reason?: string | null; checked_at?: string | null
+    last_success_at?: string | null; last_error?: string | null
+    rate_limited_until?: string | null
+  }
 }
 type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; tradingview: Section }
 type Check = { key: string; label: string; status: string; passed: boolean; detail: string }
@@ -44,7 +50,15 @@ export default function ConnectionsPanel({ token }: { token: string }) {
     {notice && <div className="alert">{notice}</div>}
     <div className="connection-cards">
       <ConnectionCard title="Market data" section="market_data" data={connections?.market_data} pending={pending} onTest={test} fields={[
-        ['Provider', connections?.market_data.provider], ['Mode', connections?.market_data.mode], ['Base URL', fieldState(connections?.market_data.base_url_configured)], ['Plan', fieldState(connections?.market_data.plan_configured)], ['Data account', fieldState(connections?.market_data.account_id_configured)], ['Credentials', fieldState(connections?.market_data.configured && connections?.market_data.provider !== 'MOCK')], ['Last successful', connections?.market_data.last_successful_connection ? new Date(connections.market_data.last_successful_connection).toLocaleString() : 'None'],
+        ['Provider', connections?.market_data.label ?? connections?.market_data.provider],
+        ['Adapter', connections?.market_data.implemented ? 'Installed' : 'Not installed'],
+        ['Connectivity', connections?.market_data.connectivity?.state ?? connections?.market_data.state ?? 'Unknown'],
+        ['State detail', connections?.market_data.connectivity?.reason ?? connections?.market_data.reason ?? 'None'],
+        ['Capabilities', capabilityList(connections?.market_data.capabilities)],
+        ['Base URL', fieldState(connections?.market_data.base_url_configured)],
+        ['Plan', fieldState(connections?.market_data.plan_configured)],
+        ['Credentials', fieldState(connections?.market_data.configured)],
+        ['Last successful', connections?.market_data.last_successful_connection ? new Date(connections.market_data.last_successful_connection).toLocaleString() : 'None'],
       ]} />
       <ConnectionCard title="Trading platform" section="trading_platform" data={connections?.trading_platform} pending={pending} onTest={test} fields={[
         ['Platform', connections?.trading_platform.name], ['Adapter', connections?.trading_platform.adapter], ['Environment', connections?.trading_platform.environment], ['Base URL', fieldState(connections?.trading_platform.base_url_configured)], ['Account ID', fieldState(connections?.trading_platform.account_id_configured)], ['Credentials', fieldState(connections?.trading_platform.configured && connections?.trading_platform.adapter !== 'mock')], ['Capabilities', capabilitySummary(connections?.trading_platform.capabilities)], ['Last successful', connections?.trading_platform.last_successful_connection ? new Date(connections.trading_platform.last_successful_connection).toLocaleString() : 'None'],
@@ -64,7 +78,7 @@ export default function ConnectionsPanel({ token }: { token: string }) {
       <div className="readiness-summary"><span>Performance: <b>{readiness?.performance_qualification ?? 'NOT_QUALIFIED'}</b></span><span>Evaluation: <b>{readiness?.evaluation_trades ?? 0} trades · {(readiness?.measured_win_rate ?? 0).toFixed(1)}%</b></span></div>
       <div className="check-grid">{readiness?.checks.map((check) => <div className="check-row" key={check.key}><i className={check.passed ? 'check-ok' : check.status === 'LOCKED' ? 'check-locked' : 'check-no'} />{check.label}<span>{check.status}</span></div>)}</div>
     </div>
-    <p className="connection-footnote">Local Mock connections can be checked without credentials. External connection tests report unsupported until an official provider adapter is installed; this screen will not invent endpoints or make network calls.</p>
+    <p className="connection-footnote">Connection tests run in the backend only; this screen never contacts a provider or performs a network request. A configured provider reports real connectivity (CONNECTED, STALE, RATE_LIMITED, UNAVAILABLE) from recorded evidence, and no screen invents endpoints or prices.</p>
   </div>
 }
 
@@ -75,6 +89,10 @@ function ConnectionCard({ title, section, data, pending, onTest, fields }: { tit
 }
 
 function fieldState(configured?: boolean) { return configured ? 'Configured (hidden)' : 'Not set' }
+function capabilityList(value: unknown) {
+  if (!Array.isArray(value) || !value.length) return 'None reported'
+  return value.map((item) => String(item)).join(' · ')
+}
 function capabilitySummary(value: unknown) {
   if (!value || typeof value !== 'object') return 'Unavailable'
   const caps = value as Record<string, unknown>

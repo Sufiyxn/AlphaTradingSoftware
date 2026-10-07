@@ -15,7 +15,15 @@ class Bar:
 
 @dataclass(frozen=True, slots=True)
 class Quote:
+    """One observed trade price.
+
+    ``bid``/``ask`` are optional because many read-only trade endpoints do not
+    publish a book; they stay ``None`` rather than being estimated.
+    """
+
     symbol: str
     timestamp: datetime
     price: float
     volume: float
+    bid: float | None = None
+    ask: float | None = None

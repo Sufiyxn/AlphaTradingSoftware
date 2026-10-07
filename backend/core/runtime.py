@@ -42,7 +42,7 @@ class ApplicationRuntime:
         self.repository = SQLiteJournalRepository(database_path)
         self.market_data_provider = (
             market_data_provider if market_data_provider is not None
-            else build_market_data_provider(self.config.market_data))
+            else build_market_data_provider(self.config.market_data, clock=self.clock))
         self.market_data = MarketDataService(self.market_data_provider)
         self.market_data_bridge = MarketDataBridge(
             self.market_data, clock=self.clock,

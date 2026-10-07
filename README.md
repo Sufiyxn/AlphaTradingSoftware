@@ -66,10 +66,12 @@ Responses are machine-readable (`202 ACCEPTED`, `400 INVALID_PAYLOAD`, `401 AUTH
 
 The product ships with **no market data connected**. `GET /api/status` reports `market_data_state: NOT_CONFIGURED`, the scanner returns no candidates, and no position is opened. Nothing is substituted in their place: there is no bundled history, no sample series, and no synthetic candle anywhere in the runtime.
 
-Connect one of the documented providers in `.env` to supply prices:
+Connect one of the documented providers in `.env` to supply prices (configuration, states, and error mapping are documented in `docs/MARKET_DATA.md`):
 
 - a configured market-data provider (Polygon, Alpha Vantage) for live and historical prices;
 - TradingView alerts delivered to the webhook endpoint for signals.
+
+Each provider reads only its own key (`POLYGON_API_KEY`, `ALPHAVANTAGE_API_KEY`), and credentials alone never count as connectivity: the backend records real evidence per request - `UNAVAILABLE` until the first success, then `CONNECTED`, downgraded to `STALE` after the freshness window, `RATE_LIMITED` while throttled, or `ERROR` when credentials are rejected or a response breaks the documented schema. `GET /api/backtest` runs only on bars actually retrieved from the connected provider and answers `status: NO_DATA` when there are none, rather than claiming a result.
 
 Paper trading then simulates **execution and account only** - simulated cash (`PAPER_STARTING_CASH`), simulated fills, simulated positions, and simulated P&L computed from those real prices. A paper position opened with no continuous price source is marked `UNPRICED` and is never marked, stopped, or targeted from an invented price; stop-loss and take-profit act only once a real price feed is connected. Manual closure stays available and always requires an explicit real exit price.
 
@@ -79,7 +81,7 @@ Because the portfolio is in-memory but every trade is journaled, `ApplicationRun
 
 Deterministic fixtures used by the automated tests live in `backend/testing`. `ApplicationRuntime` never imports them; passing a fixture into the runtime happens only from a test.
 
-The **Connections & Live Setup** section reports configuration presence for market data, platform, AI, notifications, and TradingView. Each section reports `configured` (credentials supplied), `implemented` (this build ships the adapter), and `state` (`CONFIGURED` or `NOT_CONFIGURED`), and a connection test returns `NOT_CONFIGURED` rather than a pass when nothing is connected. TradingView additionally reports a live webhook state - `NOT_CONFIGURED`, `UNAVAILABLE`, `CONNECTED`, `STALE`, or `ERROR` - that only reaches `CONNECTED` after an authenticated signal has actually been processed; its connection test is a local authentication self-check. No check makes a network request. Secret values are never returned by the API or stored in SQLite. Live mode is locked until the live gate opens.
+The **Connections & Live Setup** section reports configuration presence for market data, platform, AI, notifications, and TradingView. Each section reports `configured` (credentials supplied), `implemented` (this build ships the adapter), and `state` (`CONFIGURED` or `NOT_CONFIGURED`), and a connection test returns `NOT_CONFIGURED` rather than a pass when nothing is connected. When a market-data provider is configured, its connection test runs a real probe **in the backend** and the card shows the recorded connectivity (`CONNECTED`, `STALE`, `RATE_LIMITED`, `UNAVAILABLE`, `ERROR`) with its reason; the browser never contacts a vendor. TradingView additionally reports a live webhook state - `NOT_CONFIGURED`, `UNAVAILABLE`, `CONNECTED`, `STALE`, or `ERROR` - that only reaches `CONNECTED` after an authenticated signal has actually been processed; its connection test is a local authentication self-check. Secret values are never returned by the API or stored in SQLite. Live mode is locked until the live gate opens.
 
 The strategy/risk/backtest modules are available for local development. Risk remains between strategy evaluation and paper execution, including strict entry below $100, 2:1 minimum reward/risk, per-trade and daily loss limits, exposure/position limits, and the kill switch. Configuration can only tighten those limits, never widen them. Performance qualification requires a sufficient evaluation sample and at least 51% measured win rate. Fixture results are not a profitability claim or guarantee.
 

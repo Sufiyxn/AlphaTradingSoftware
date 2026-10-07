@@ -22,14 +22,68 @@ class MarketDataService:
 
     @property
     def status(self) -> dict:
-        """Honest provider state; NOT_CONFIGURED when nothing real is connected."""
-        if self.configured:
-            return {"state": "CONFIGURED", "provider": self.provider_id, "reason": None}
+        """Honest provider state; NOT_CONFIGURED when nothing real is connected.
+
+        For a real adapter the state comes from recorded evidence: credentials
+        alone report UNAVAILABLE, a successful request reports CONNECTED, a
+        quiet window downgrades to STALE, and throttles report RATE_LIMITED.
+        """
+        if not self.configured:
+            return {
+                "state": "NOT_CONFIGURED",
+                "provider": self.provider_id,
+                "reason": str(getattr(self._provider, "reason", None)
+                              or "no market data provider is connected"),
+            }
+        snapshot = getattr(self._provider, "health", None)
+        if isinstance(snapshot, dict) and snapshot.get("state"):
+            return dict(snapshot)
+        return {"state": "CONFIGURED", "provider": self.provider_id, "reason": None}
+
+    def check(self) -> dict:
+        """Backend connectivity probe; the browser never performs this request."""
+        if not self.configured:
+            return {
+                "status": "NOT_CONFIGURED",
+                "success": False,
+                "state": "NOT_CONFIGURED",
+                "detail": str(getattr(self._provider, "reason", None)
+                              or "no market data provider is connected"),
+            }
+        probe = getattr(self._provider, "health_check", None)
+        state = str(self.status.get("state") or "CONFIGURED")
+        if not callable(probe):
+            return {
+                "status": "UNSUPPORTED",
+                "success": False,
+                "state": state,
+                "detail": (f"the {self.provider_id} provider exposes no connectivity "
+                           "probe; no network request was made"),
+            }
+        outcome = probe()
+        if not isinstance(outcome, dict):
+            return {
+                "status": "UNSUPPORTED",
+                "success": False,
+                "state": state,
+                "detail": (f"the {self.provider_id} provider returned an unusable probe "
+                           "result; no network request was made"),
+            }
+        success = bool(outcome.get("success"))
         return {
-            "state": "NOT_CONFIGURED",
-            "provider": self.provider_id,
-            "reason": str(getattr(self._provider, "reason", None) or "no market data provider is connected"),
+            "status": str(outcome.get("status") or ("PASSED" if success else "FAILED")),
+            "success": success,
+            "state": str(self.status.get("state") or state),
+            "detail": str(outcome.get("detail") or ""),
         }
+
+    def lookup(self, symbol: str) -> dict | None:
+        """Instrument lookup for a connected provider, or None when unsupported."""
+        lookup_symbol = getattr(self._provider, "lookup_symbol", None)
+        if not callable(lookup_symbol):
+            raise MarketDataProviderError(
+                f"symbol lookup is not supported by the {self.provider_id} provider")
+        return lookup_symbol(symbol)
 
     def get_historical(self, symbol: str, start: datetime, end: datetime) -> tuple[Bar, ...]:
         if start.tzinfo is None or start.utcoffset() is None or end.tzinfo is None or end.utcoffset() is None:
@@ -42,6 +96,8 @@ class MarketDataService:
         try:
             bars = tuple(normalize_bar(bar) for bar in self._provider.get_historical(requested_symbol, start, end))
         except DataValidationError:
+            raise
+        except MarketDataProviderError:
             raise
         except Exception as error:
             raise MarketDataProviderError(f"historical data request failed for {requested_symbol}") from error
@@ -63,6 +119,8 @@ class MarketDataService:
         try:
             quotes = tuple(normalize_quote(quote) for quote in self._provider.get_latest(requested))
         except DataValidationError:
+            raise
+        except MarketDataProviderError:
             raise
         except Exception as error:
             raise MarketDataProviderError("latest data request failed") from error

@@ -21,7 +21,7 @@ class MarketDataRegistryTests(unittest.TestCase):
         self.assertEqual(provider.get_historical("AAPL", NOW, NOW), ())
         self.assertEqual(provider.symbols, ())
 
-    def test_every_catalog_vendor_resolves_to_unconfigured_until_installed(self):
+    def test_catalog_vendor_with_credentials_resolves_to_a_real_adapter(self):
         for provider_id in MARKET_DATA_CATALOG:
             with self.subTest(provider_id=provider_id):
                 settings = load_config(env={
@@ -30,9 +30,37 @@ class MarketDataRegistryTests(unittest.TestCase):
                     "ALPHAVANTAGE_API_KEY": "present",
                 }).market_data
                 built = build_market_data_provider(settings)
+                self.assertNotIsInstance(built, UnconfiguredMarketDataProvider)
+                self.assertEqual(built.provider, provider_id)
+                self.assertTrue(built.is_configured)
+                self.assertTrue(settings.available)
+                self.assertTrue(is_implemented(provider_id))
+
+    def test_catalog_vendor_without_credentials_reports_the_missing_key(self):
+        for provider_id in MARKET_DATA_CATALOG:
+            with self.subTest(provider_id=provider_id):
+                settings = load_config(env={
+                    "MARKET_DATA_PROVIDER": provider_id,
+                }).market_data
+                built = build_market_data_provider(settings)
                 self.assertIsInstance(built, UnconfiguredMarketDataProvider)
-                self.assertFalse(is_implemented(provider_id))
-                self.assertIn("not installed", built.reason)
+                self.assertIn("no credentials", built.reason)
+                self.assertFalse(settings.configured)
+                self.assertTrue(is_implemented(provider_id))
+                self.assertEqual(built.get_latest(("AAPL",)), ())
+
+    def test_a_catalog_vendor_without_a_registered_adapter_is_not_installed(self):
+        from backend.market_data import registry
+        removed = registry.IMPLEMENTED.pop("polygon")
+        self.addCleanup(registry.IMPLEMENTED.__setitem__, "polygon", removed)
+        settings = load_config(env={
+            "MARKET_DATA_PROVIDER": "polygon",
+            "POLYGON_API_KEY": "present",
+        }).market_data
+        built = build_market_data_provider(settings)
+        self.assertIsInstance(built, UnconfiguredMarketDataProvider)
+        self.assertIn("not installed", built.reason)
+        self.assertFalse(is_implemented("polygon"))
 
     def test_a_registered_builder_alone_is_not_enough(self):
         from backend.market_data import registry

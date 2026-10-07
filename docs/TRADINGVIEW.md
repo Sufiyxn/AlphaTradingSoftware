@@ -179,4 +179,6 @@ A configured secret alone never reports `CONNECTED`.
 ## Scope
 
 Not in this phase: TradingView as a price source, direct broker execution from an alert,
-TradingView charting, market-data providers (Phase 5), and broker adapters (Phase 6).
+TradingView charting, market-data providers (Phase 5), and the Connection & Execution Provider
+Framework (Phase 6). TradingView remains required for the initial testing/demonstration workflow
+as a signal source after execution providers land; see `docs/PLAN.md`.

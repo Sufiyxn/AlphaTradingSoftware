@@ -30,10 +30,19 @@ class MarketDataSettings:
     account_id: str | None = None
     timeframe: str = "1min"
     stale_after_seconds: float = 300.0
+    timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
         if self.stale_after_seconds <= 0:
             raise ValueError("stale_after_seconds must be positive")
+        if self.timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        found = self.entry
+        if found is not None and found.timeframes and self.timeframe not in found.timeframes:
+            supported = ", ".join(found.timeframes)
+            raise ValueError(
+                f"timeframe {self.timeframe!r} is not supported by {found.label}; "
+                f"use one of {supported}")
 
     @property
     def known(self) -> bool:
@@ -48,7 +57,7 @@ class MarketDataSettings:
         found = self.entry
         if found is None:
             return False
-        values = {"POLYGON_API_KEY": self.api_key, "ALPHAVANTAGE_API_KEY": self.api_key}
+        values = {name: self.api_key for name in found.required_credentials}
         return not _missing(self.provider, MARKET_DATA_CATALOG, found.required_credentials, values)
 
     @property
@@ -56,7 +65,7 @@ class MarketDataSettings:
         found = self.entry
         if found is None:
             return ()
-        values = {"POLYGON_API_KEY": self.api_key, "ALPHAVANTAGE_API_KEY": self.api_key}
+        values = {name: self.api_key for name in found.required_credentials}
         return _missing(self.provider, MARKET_DATA_CATALOG, found.required_credentials, values)
 
     @property
@@ -100,6 +109,7 @@ class MarketDataSettings:
             "account_id_configured": bool(self.account_id),
             "timeframe": self.timeframe,
             "stale_after_seconds": self.stale_after_seconds,
+            "timeout_seconds": self.timeout_seconds,
             "markets": list(found.markets) if found else [],
             "timeframes": list(found.timeframes) if found else [],
             "capabilities": list(found.capabilities) if found else [],
