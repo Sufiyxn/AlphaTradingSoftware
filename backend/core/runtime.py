@@ -52,7 +52,7 @@ class ApplicationRuntime:
             stale_after_seconds=self.config.market_data.stale_after_seconds)
 
         self.portfolio = Portfolio(trading.paper_starting_cash, clock=self.clock)
-        self.risk = RiskEngine(self.config.risk)
+        self.risk = RiskEngine(self.config.risk, clock=self.clock)
 
         self.registry = AdapterRegistry()
         self.paper_adapter = LocalPaperAdapter(cash=trading.paper_starting_cash, clock=self.clock)

@@ -66,11 +66,16 @@ class Config:
                 "min_reward_risk": self.risk.min_reward_risk,
                 "risk_fraction": self.risk.risk_fraction,
                 "max_risk_per_trade": self.risk.max_risk_per_trade,
+                "max_risk_amount": self.risk.max_risk_amount,
                 "max_position_notional": self.risk.max_position_notional,
                 "max_portfolio_exposure_fraction": self.risk.max_portfolio_exposure_fraction,
                 "max_simultaneous_positions": self.risk.max_simultaneous_positions,
                 "max_daily_loss_fraction": self.risk.max_daily_loss_fraction,
                 "allow_duplicate_symbol": self.risk.allow_duplicate_symbol,
+                "max_quantity": self.risk.max_quantity,
+                "max_symbol_exposure": self.risk.max_symbol_exposure,
+                "max_entry_price": self.risk.max_entry_price,
+                "require_fresh_valuation": self.risk.require_fresh_valuation,
             },
             "strategy": {
                 "name": self.strategy_name,
@@ -92,11 +97,12 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     if env is None:
         load_local_env()
         env = os.environ
+    trading = _trading_settings(env)
     return Config(
         app=_app_settings(env),
-        trading=_trading_settings(env),
+        trading=trading,
         strategy=_strategy_config(env),
-        risk=_risk_config(env),
+        risk=_risk_config(env, max_candidate_price=trading.max_candidate_price),
         market_data=_market_data_settings(env),
         broker=_broker_settings(env),
         tradingview=_tradingview_settings(env),
@@ -195,9 +201,15 @@ def _strategy_config(env: Mapping[str, str]) -> StrategyConfig:
     )
 
 
-def _risk_config(env: Mapping[str, str]) -> RiskConfig:
+def _risk_config(env: Mapping[str, str], *, max_candidate_price: float = 100.0) -> RiskConfig:
     defaults = RiskConfig()
     risk_amount = _get(env, "RISK_MAX_RISK_AMOUNT")
+    # The risk layer's entry ceiling may only TIGHTEN the trading candidate
+    # price limit: the effective value is the lower of the two, so risk can
+    # never accept a price that the trading paths refuse before submission.
+    entry_price = parse_number(_get(env, "RISK_MAX_ENTRY_PRICE"),
+                               default=defaults.max_entry_price,
+                               name="RISK_MAX_ENTRY_PRICE")
     return RiskConfig(
         risk_fraction=parse_number(_get(env, "RISK_FRACTION"), default=defaults.risk_fraction,
                                    name="RISK_FRACTION"),
@@ -219,6 +231,13 @@ def _risk_config(env: Mapping[str, str]) -> RiskConfig:
         allow_duplicate_symbol=parse_bool(_get(env, "RISK_ALLOW_DUPLICATE_SYMBOL"),
                                           default=defaults.allow_duplicate_symbol),
         enabled=parse_bool(_get(env, "RISK_ENABLED"), default=defaults.enabled),
+        max_quantity=_int(env, "RISK_MAX_QUANTITY", defaults.max_quantity),
+        max_symbol_exposure=parse_number(_get(env, "RISK_MAX_SYMBOL_EXPOSURE"),
+                                         default=defaults.max_symbol_exposure,
+                                         name="RISK_MAX_SYMBOL_EXPOSURE"),
+        max_entry_price=min(entry_price, float(max_candidate_price)),
+        require_fresh_valuation=parse_bool(_get(env, "RISK_REQUIRE_FRESH_VALUATION"),
+                                           default=defaults.require_fresh_valuation),
     )
 
 

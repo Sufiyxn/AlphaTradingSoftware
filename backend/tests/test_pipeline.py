@@ -68,10 +68,11 @@ class SpyRisk(RiskEngine):
         self.calls = []
         self.trail = trail if trail is not None else []
 
-    def evaluate(self, proposed, portfolio):
+    def evaluate(self, proposed, portfolio, *, requested_quantity=None):
         self.calls.append(proposed.symbol)
         self.trail.append("risk")
-        return super().evaluate(proposed, portfolio)
+        return super().evaluate(proposed, portfolio,
+                                requested_quantity=requested_quantity)
 
 
 class SpyAdapter(MockTradingPlatformAdapter):

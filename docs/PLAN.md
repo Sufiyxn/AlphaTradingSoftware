@@ -19,14 +19,19 @@
 > in-process `local_paper` account — plus honestly advertised, deliberately unimplemented external
 > providers (`alpaca`, `robinhood`).*
 >
-> *Phase 7 checkpoint: the canonical `TradingPipeline` described below is implemented and verified
-> (327 passed, 121 subtests; `tsc --noEmit` clean; `npm run build` succeeds; HTTP smoke passed with
-> a signed webhook travelling ConnectionManager → RiskEngine → ExecutionSafetyGate → verified
-> adapter → position, and 1 order / 1 risk decision row in the journal) and is **complete but left
-> uncommitted** pending review. TradingView, the orchestrator, and the paper engine all enter
-> through `PaperTradingEngine.submit_decision`; no production file outside `backend/execution/`
-> and `backend/pipeline/` calls `place_order` (enforced by `backend/tests/test_pipeline.py`).
-> **Phase 8 has not started.***
+> *Phase 7 was committed as `2f1eee5 Complete phase 7 canonical trading pipeline` (16 files,
+> +1613/−109) on top of Phase 6; nothing before it was amended.*
+> *Phase 8 checkpoint: the risk hardening described below is implemented and verified
+> (395 passed, 150 subtests; `tsc --noEmit` clean; `npm run build` succeeds; HTTP smoke passed
+> with 46 checks — accepted trade, reward:risk < 2, wrong-side/zero/missing price, duplicate
+> symbol, stale timestamp, tightened exposure, and kill-switch rejections, each journaled in
+> `risk_decisions` with its deciding code while exactly 1 order row reached the paper adapter)
+> and is **complete but left uncommitted** pending review. `RiskEngine` is the single
+> deterministic pre-trade boundary: sizing, exposure, daily loss, duplicate-symbol, price
+> sanity, 2:1 reward:risk, kill switch, and configuration limits are enforced before any
+> adapter can be called, and `RiskDecision` now records every field needed to audit the
+> decision from the journal alone. Full detail: `docs/PIPELINE.md`.
+> **Phase 9 has not started.***
 
 ---
 
@@ -238,8 +243,8 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 4 | TradingView Integration | **DONE** |
 | 5 | Real Market-Data Providers | **DONE** |
 | 6 | Connection & Execution Provider Framework | **DONE** |
-| 7 | Canonical Trading Pipeline | **DONE** (verified, uncommitted) |
-| 8 | Risk Hardening | pending |
+| 7 | Canonical Trading Pipeline | **DONE** (committed: `2f1eee5`) |
+| 8 | Risk Hardening | **DONE** (verified, uncommitted) |
 | 9 | Order Lifecycle Management & Reconciliation | pending |
 | 10 | First-Class Position Management | pending |
 | 11 | Market-Session / Market-Hours Handling | pending |
@@ -257,10 +262,10 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 23 | Testing / Dependencies / CI | pending |
 | 24 | Final Integration / Production Readiness | pending |
 
-> The completed sequence 1–7 is fixed (Phase 6 is committed at its checkpoint; Phase 7 is
-> verified and **uncommitted**). Phases 8–24
+> The completed sequence 1–8 is fixed (Phase 6 is committed at its checkpoint; Phase 7 is
+> committed at `2f1eee5`; Phase 8 is verified and **uncommitted**). Phases 9–24
 > are all **pending**; their internal order may be refined only by an explicit, approved
-> documentation update. **Phase 8 must not begin without explicit approval.**
+> documentation update. **Phase 9 must not begin without explicit approval.**
 
 ---
 
@@ -388,7 +393,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 
 ---
 
-## Phase 6 (committed), Phase 7 (complete, uncommitted), and future phases (not started)
+## Phase 6–7 (committed), Phase 8 (complete, uncommitted), and future phases (not started)
 
 ### PHASE 6 — Connection & Execution Provider Framework · **DONE (COMMITTED)**
 
@@ -420,10 +425,11 @@ Delivered scope (was the future-phase scope below):
 - extensibility: adding a provider must not require modifying the core trading strategy/decision
   engine; if automatic provider identification is impossible, the UI asks the client to identify it
 
-### PHASE 7 — Canonical Trading Pipeline · **DONE (UNCOMMITTED)**
+### PHASE 7 — Canonical Trading Pipeline · **DONE (COMMITTED)**
 
 > Implemented and verified (327 passed, 121 subtests; `tsc --noEmit` clean; `npm run build`
-> succeeds; HTTP smoke passed) and deliberately **left uncommitted** pending review. Full detail:
+> succeeds; HTTP smoke passed) and committed as
+> `2f1eee5 Complete phase 7 canonical trading pipeline` (16 files, +1613/−109). Full detail:
 > `docs/PIPELINE.md`.
 
 Delivered scope (was the future-phase scope below):
@@ -455,10 +461,51 @@ Delivered scope (was the future-phase scope below):
   duplicate orchestration paths; broker/provider agnostic; ensure no component can bypass
   risk/execution controls.
 
-### PHASE 8 — Risk Hardening
-- Move all entry/exposure constraints into the proper risk layer; configurable candidate-price and
-  position limits; position sizing; daily loss limits; exposure limits; stop-loss/take-profit
-  validation; risk re-evaluation before execution; fail closed.
+### PHASE 8 — Risk Hardening · **DONE (UNCOMMITTED)**
+
+> Implemented and verified (395 passed, 150 subtests — `backend/tests/test_risk_hardening.py`
+> adds 68 tests / 29 subtests on top of the Phase 1–7 suites; `tsc --noEmit` clean;
+> `npm run build` succeeds; HTTP smoke passed with 46 checks) and deliberately **left
+> uncommitted** pending review. Full detail: `docs/PIPELINE.md` ("Risk controls").
+
+Delivered scope (was the future-phase scope below):
+
+- all entry/exposure constraints live in the risk layer as one deterministic 7-step evaluation
+  (`backend/risk/service.py`): configuration + kill switch → price sanity + entry-price ceiling →
+  direction/geometry (long: stop < entry < target; short: target < entry < stop) → trade risk > 0
+  and reward:risk ≥ 2.0 → portfolio state (valuation freshness, equity, daily loss, max
+  positions, duplicate symbol) → sizing with `approved = min(safe, requested)` (a request is only
+  ever reduced) → final invariant checks (trade risk, max quantity, notional, symbol exposure,
+  projected portfolio exposure)
+- configurable candidate-price and position limits: `RISK_MAX_QUANTITY` (10000, ceiling 100000),
+  `RISK_MAX_SYMBOL_EXPOSURE` (25000), `RISK_MAX_ENTRY_PRICE` (100; may only tighten
+  `MAX_CANDIDATE_PRICE`, never widen it), `RISK_REQUIRE_FRESH_VALUATION` (false), plus the
+  existing `RISK_FRACTION`, `RISK_MAX_PER_TRADE`, `RISK_MAX_RISK_AMOUNT`,
+  `RISK_MAX_POSITION_NOTIONAL`, `RISK_MAX_PORTFOLIO_EXPOSURE`, `RISK_MAX_POSITIONS`,
+  `RISK_MAX_DAILY_LOSS_FRACTION`, `RISK_MIN_REWARD_RISK` (floor 2.0), and
+  `RISK_ALLOW_DUPLICATE_SYMBOL` — every floor/ceiling is un-loosenable; a loosening value fails
+  at startup
+- position sizing as a documented constraint solver (`backend/risk/sizing.py`):
+  `risk_budget = min(available_capital × risk_fraction, equity × max_risk_per_trade,
+  max_risk_amount)`; `risk_quantity = risk_budget // |entry − stop|`; exposure/cash/notional/
+  symbol/max-quantity terms; safe quantity is their minimum; zero safe quantity rejects
+- daily loss limit, exposure limits, and duplicate-symbol fail closed with machine-readable
+  binding-limit reasons; the daily-loss window rolls on the UTC calendar day and a close landing
+  on a new day now starts that day's window (`Portfolio.close_position` rolls before
+  accumulating), with restart persistence rebuilt from the journal by `reconcile_journal`
+- stop-loss/take-profit (direction, side, and 2:1 minimum) validated before execution; risk is
+  evaluated exactly once per intent inside `TradingPipeline` and never re-evaluated or weakened
+  for a pre-approved decision; no execution without an approved risk decision
+- auditability: `RiskDecision` records `code` (first failing rule), requested vs approved
+  quantity, entry/stop/target, risk/reward per share, reward:risk, current/projected exposure,
+  daily P&L, equity, symbol-open state, active limits, and `decided_at`; the pipeline journals
+  the deciding code and quantities into `risk_decisions` and `system_events`
+- fail closed throughout: missing/NaN/infinite prices are rejected, never invented; unpriced
+  positions contribute zero market value to equity; `backend/risk/` stays provider-agnostic
+  (enforced by a source scan)
+- original scope, as approved: move all entry/exposure constraints into the proper risk layer;
+  configurable candidate-price and position limits; position sizing; daily loss limits; exposure
+  limits; stop-loss/take-profit validation; risk re-evaluation before execution; fail closed.
 
 ### PHASE 9 — Order Lifecycle Management & Reconciliation
 - Canonical order state machine across the pipeline: submitted → accepted → partially filled →

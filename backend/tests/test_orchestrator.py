@@ -70,9 +70,10 @@ class EventRisk(RiskEngine):
         self.reject = set(reject)
         self.events = events if events is not None else []
 
-    def evaluate(self, proposed, portfolio):
+    def evaluate(self, proposed, portfolio, *, requested_quantity=None):
         self.events.append(("risk", proposed.symbol))
-        decision = super().evaluate(proposed, portfolio)
+        decision = super().evaluate(proposed, portfolio,
+                                    requested_quantity=requested_quantity)
         if proposed.symbol in self.reject:
             from dataclasses import replace
             from backend.risk.models import RiskStatus

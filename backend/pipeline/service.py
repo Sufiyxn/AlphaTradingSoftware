@@ -41,7 +41,7 @@ from backend.execution.models import (
 )
 from backend.portfolio import Portfolio
 from backend.risk import RiskEngine
-from backend.risk.models import RiskDecision, RiskStatus
+from backend.risk.models import RiskCode, RiskDecision, RiskStatus
 from backend.strategies.models import Direction, TradeSetup
 
 from .models import ExecutionIntent, PipelineCode, PipelineResult
@@ -206,8 +206,13 @@ class TradingPipeline:
 
         # 5. evaluate risk ---------------------------------------------------
         if decision is None:
-            decision = self._risk_engine.evaluate(request.setup,
-                                                  self._portfolio.snapshot())
+            # Exactly one RiskEngine call per intent. The requested quantity
+            # travels with the request so the approved quantity is
+            # min(safe, requested) - a request is only ever reduced, never
+            # widened - and the decision records both values for audit.
+            decision = self._risk_engine.evaluate(
+                request.setup, self._portfolio.snapshot(),
+                requested_quantity=request.requested_quantity)
             decision = self._apply_quantity_cap(request, decision)
             self._record_risk(decision)
             if not decision.approved or decision.quantity <= 0:
@@ -228,7 +233,8 @@ class TradingPipeline:
         elif self._risk_engine.kill_switch_enabled:
             stopped = replace(
                 decision, status=RiskStatus.REJECTED, quantity=0, risk_amount=0.0,
-                reasons=decision.reasons + ("kill switch enabled",))
+                reasons=decision.reasons + ("kill switch enabled",),
+                code=RiskCode.KILL_SWITCH)
             self._record_risk(stopped)
             return self._outcome(
                 request, code=PipelineCode.KILL_SWITCH, risk=stopped,
@@ -457,13 +463,13 @@ class TradingPipeline:
             self._record_event(
                 "EXECUTION_SUBMITTED",
                 f"execution pipeline submitted {request.setup.symbol} via {result.provider_id}",
-                request=request, code=code, reason=None, order=order)
+                request=request, code=code, reason=None, order=order, risk=risk)
         else:
             symbol = request.setup.symbol if isinstance(request.setup, TradeSetup) else None
             self._record_event(
                 "EXECUTION_REJECTED",
                 f"execution pipeline rejected {symbol or 'the request'}: {code}",
-                request=request, code=code, reason=reason, order=order)
+                request=request, code=code, reason=reason, order=order, risk=risk)
         return result
 
     # ---------------------------------------------------------------- journal
@@ -474,7 +480,8 @@ class TradingPipeline:
         self._journal_call("record_order", order)
 
     def _record_event(self, event_type: str, message: str, *, request: _Request,
-                      code: str, reason: str | None, order=None) -> None:
+                      code: str, reason: str | None, order=None,
+                      risk: RiskDecision | None = None) -> None:
         context: dict = {
             "code": code,
             "source": request.source,
@@ -489,6 +496,15 @@ class TradingPipeline:
         if order is not None:
             context["order_id"] = getattr(order, "order_id", None)
             context["order_status"] = str(getattr(order, "status", "") or "")
+        if risk is not None:
+            # Auditability: which risk rule decided, what was asked for, what
+            # was approved - never a secret and never a fabricated value.
+            context["risk_code"] = risk.code
+            context["risk_approved"] = bool(risk.approved)
+            context["risk_requested_quantity"] = risk.requested_quantity
+            context["risk_approved_quantity"] = risk.quantity
+            if not risk.approved and risk.reasons:
+                context["risk_reasons"] = list(risk.reasons)
         symbol = request.setup.symbol if isinstance(request.setup, TradeSetup) else None
         self._journal_call("record_event", self._clock(), event_type, message,
                            symbol=symbol, context=context)

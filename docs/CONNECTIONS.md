@@ -144,7 +144,11 @@ before it evaluates risk and again before it hands the order to the adapter, so 
 switch or a locked LIVE mode rejects with `KILL_SWITCH` / `SAFETY_REJECTED` before any provider
 is touched (`docs/PIPELINE.md`). It cannot be bypassed because the order path reaches only
 through that pipeline, no live adapter exists, and `RiskEngine` (including its kill switch) sits
-inside every execution call.
+inside every execution call. Since Phase 8 the same pipeline also enforces the full risk
+hardening set — sizing, per-trade risk, 2:1 reward:risk, exposure/symbol/daily-loss limits,
+duplicate-symbol and price sanity — as machine-readable `RiskDecision` codes journaled per
+intent, so a connection can be fully verified and still never receive an order the risk layer
+did not approve (`docs/PIPELINE.md`, "Risk controls").
 
 ## Orders
 

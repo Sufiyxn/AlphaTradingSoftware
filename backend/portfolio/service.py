@@ -113,12 +113,15 @@ class Portfolio:
             raise ValueError("invalid close parameters")
         sign = 1 if position.direction is Direction.LONG else -1
         pnl = (price - position.average_entry_price) * sign * quantity - fees
+        timestamp = timestamp or self._clock()
+        # Roll the trading day BEFORE accumulating, so a close landing on a new
+        # UTC day starts that day's window instead of being wiped (or carrying
+        # the previous day's P&L) by a roll that ran too late.
+        self._roll_day(timestamp)
         self.cash += sign * quantity * price - fees
         self.realized_pnl += pnl
         self.daily_pnl += pnl
         self.trade_count += 1
-        timestamp = timestamp or self._clock()
-        self._roll_day(timestamp)
         remaining = position.quantity - quantity
         if remaining:
             self._positions[symbol] = Position(

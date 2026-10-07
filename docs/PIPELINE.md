@@ -1,17 +1,20 @@
-# Canonical Trading Pipeline (Phase 7)
+# Canonical Trading Pipeline & Risk Controls (Phases 7–8)
 
 The one path from an execution request to an order. Every signal source — a TradingView alert,
 the orchestrator's scanner cycle, an internal caller — hands an `ExecutionIntent` (or a
 pre-approved `RiskDecision`) to `PaperTradingEngine.submit_decision`, which runs it through
-`TradingPipeline`. Nothing else in the product calls `place_order`.
+`TradingPipeline`. Nothing else in the product calls `place_order`, and nothing reaches an
+adapter without an approved `RiskDecision` from the single `RiskEngine` inside the pipeline.
 
-- Code: `backend/pipeline/` (`models.py`, `service.py`)
+- Code: `backend/pipeline/` (`models.py`, `service.py`); risk: `backend/risk/`
+  (`config.py`, `models.py`, `service.py`, `sizing.py`)
 - Entry point: `backend/paper_trading/engine.py` (`submit` / `execute` / `submit_decision`)
 - Signal paths: `backend/tradingview/service.py::_execute_entry`,
   `backend/orchestrator/service.py::_run_cycle`
 - Wiring: `backend/core/runtime.py` — the paper engine shares the runtime's
-  `ConnectionManager`, so the Connection Center reports the same connection the orders use
-- Tests / proof: `backend/tests/test_pipeline.py`
+  `ConnectionManager`, so the Connection Center reports the same connection the orders use;
+  `RiskEngine` is constructed with the loaded `RiskConfig` and the shared clock
+- Tests / proof: `backend/tests/test_pipeline.py`, `backend/tests/test_risk_hardening.py`
 
 ## Canonical flow
 
@@ -25,8 +28,9 @@ signal source (TradingView alert | scanner cycle | internal)
        3. signal freshness        - STALE_SIGNAL (before risk, before any adapter)
        4. resolve + verify        - ConnectionManager.get/verify; CONNECTION_NOT_FOUND /
                                     CONNECTION_NOT_READY / PROVIDER_* by honest state
-       5. risk evaluation         - RiskEngine against the live portfolio snapshot, then the
-                                    signal's quantity cap (reduce-only); journaled exactly once
+       5. risk evaluation         - RiskEngine against the live portfolio snapshot, with the
+                                    signal's quantity cap passed in as requested_quantity
+                                    (reduce-only, folded into sizing); journaled exactly once
                                     -> RISK_REJECTED / KILL_SWITCH
        6. execution safety gate   - ExecutionSafetyGate.authorize(mode)
                                     -> KILL_SWITCH / SAFETY_REJECTED
@@ -49,6 +53,91 @@ Fail-closed ordering matters: invalid input and stale signals are refused **befo
 evaluated, an unresolvable connection is refused before risk, risk runs before the gate, and the
 adapter is touched last. A gate block does not hide the risk decision — risk is still evaluated
 and journaled so the record shows what risk said.
+
+## Risk controls (Phase 8)
+
+`RiskEngine.evaluate(setup, portfolio, *, requested_quantity=None)` is the only place an
+intent is judged. It runs seven steps in a fixed order and returns one `RiskDecision`; the
+first failing rule becomes `decision.code`, and every rule that failed appends its reason.
+
+1. **Configuration + kill switch** — invalid config or `set_kill_switch(True)` rejects
+   (`KILL_SWITCH`); the switch is never overridden anywhere else.
+2. **Price sanity** — entry/stop/target must be positive, finite, non-NaN; entry must not
+   exceed the entry-price ceiling.
+3. **Geometry** — long requires stop < entry < target, short requires target < entry < stop.
+4. **Trade risk + reward:risk** — `trade_risk = |entry − stop|`, `trade_reward = |target − entry|`
+   (direction-adjusted), both must be > 0, and `reward:risk = trade_reward / trade_risk` must be
+   ≥ `min_reward_risk` (floor 2.0, never loosened).
+5. **Portfolio state** — valuation freshness (optional strict mode), equity available, daily
+   loss limit (`daily_pnl ≤ −max_daily_loss_fraction × current equity`, UTC-day window), max
+   simultaneous positions, duplicate-symbol prohibition.
+6. **Sizing** — see formulas below; the requested quantity is applied as `approved = min(safe,
+   requested)`; a request can only ever *reduce* the size, never widen it.
+7. **Final invariants** — per-share risk ≤ limits, quantity ≤ max quantity, notional ≤ position
+   notional, symbol exposure and projected portfolio exposure within their caps. When a limit
+   has zero remaining room the quantity comes back 0 (`ZERO_SAFE_QUANTITY`) and the binding
+   limit's own reason is appended after the generic one.
+
+### Formulas
+
+```
+risk_budget     = min(available_capital × risk_fraction,
+                      equity × max_risk_per_trade,
+                      max_risk_amount)          # last term only when configured
+safe_quantity  = min(
+                   risk_budget // |entry − stop|,          # trade-risk term
+                   max_quantity,                            # share ceiling (10000, unloosenable)
+                   max_position_notional // entry,          # per-position notional
+                   (max_portfolio_exposure × equity − current_exposure) // entry,
+                   (max_symbol_exposure − symbol_notional) // entry,
+                   available_capital // entry)              # cash term
+approved        = min(safe_quantity, requested_quantity)    # requested only ever reduces
+```
+
+Every floor/ceiling is validated at load time: a value that loosens a floor (or widens a
+ceiling) raises `ValueError` at startup, so configuration can only tighten risk.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RISK_ENABLED` | `true` | Master switch; false rejects everything at step 1. |
+| `RISK_MIN_REWARD_RISK` | `2.0` | Minimum reward:risk; values below 2.0 fail at load. |
+| `RISK_FRACTION` | `0.01` | Fraction of available capital risked per trade (≤ 0.05). |
+| `RISK_MAX_PER_TRADE` | `0.01` | Fraction of equity risked per trade (≤ 0.05). |
+| `RISK_MAX_RISK_AMOUNT` | unset | Optional absolute currency risk cap per trade; applied only when set. |
+| `RISK_MAX_POSITION_NOTIONAL` | `25000` | Gross notional cap for one open position. |
+| `RISK_MAX_PORTFOLIO_EXPOSURE` | `0.50` | Fraction of equity that may be in open positions. |
+| `RISK_MAX_POSITIONS` | `5` | Maximum simultaneous open positions (ceiling 50). |
+| `RISK_MAX_DAILY_LOSS_FRACTION` | `0.03` | Daily loss stop as a fraction of current equity (≤ 0.10). |
+| `RISK_MAX_QUANTITY` | `10000` | Absolute share ceiling for one order (ceiling 100000). |
+| `RISK_MAX_SYMBOL_EXPOSURE` | `25000` | Gross notional for one symbol, existing position included. |
+| `RISK_MAX_ENTRY_PRICE` | `100` | Entry-price ceiling in the risk layer; effective value is min(this, `MAX_CANDIDATE_PRICE`). |
+| `RISK_REQUIRE_FRESH_VALUATION` | `false` | When true, any UNPRICED/STALE open position blocks new entries. |
+| `RISK_ALLOW_DUPLICATE_SYMBOL` | `false` | Second position in the same symbol (still exposure-capped). |
+
+### Decision audit
+
+`RiskDecision` carries everything needed to replay the reasoning from the journal alone:
+`approved` (with `status`, `code` = first failing rule, `reasons`), `requested_quantity` vs
+`quantity`, `entry/stop/target`, `risk_amount` / `risk_per_share` / `reward_per_share` /
+`reward_risk`, `current_exposure` / `projected_exposure`, `daily_pnl`, `equity`,
+`symbol_open`, `limits` (the active `RiskConfig.limits` snapshot), `decided_at`. The pipeline
+journals it once via `record_risk_decision` (with its own context: source, pipeline code,
+requested/approved quantities) and never re-evaluates or weakens a pre-approved decision.
+
+### Fail-closed honesty
+
+- Missing, NaN, or infinite prices are **rejected**, never invented or defaulted.
+- Unpriced positions contribute **zero** market value to equity (they never fabricate value);
+  in strict mode they also block new entries.
+- `backend/risk/` is provider-agnostic by construction — no broker/exchange/adaptor imports
+  (enforced by a source scan test).
+- Daily loss state survives restart because `reconcile_journal` rebuilds `daily_pnl` from
+  closed trades whose exit date equals the current **UTC** calendar day; the day rolls before a
+  close is accumulated (`Portfolio.close_position`), so a close landing on a new day starts that
+  day's window rather than poisoning it. Everything else in memory (sizing caches, idempotency
+  window) is rebuilt or intentionally volatile.
 
 ## Rejection codes
 
@@ -136,6 +225,26 @@ there is no direct-to-adapter path even in tests.
 - source scans: `place_order(` appears only under `backend/execution/` and `backend/pipeline/`
   in production code, and both signal services enter through `submit_decision`.
 
-Verification (Phase 7): `327 passed, 121 subtests`; `tsc --noEmit` clean; `npm run build`
-succeeds; HTTP smoke passed (signed webhook → `202` → position; duplicate → `409`; journal holds
-exactly one order and one risk decision; no secret in any response).
+`backend/tests/test_risk_hardening.py` (Phase 8, 68 tests / 29 subtests):
+
+- sizing and every formula term, per-trade risk, 2:1 reward:risk (below-minimum rejection and
+  the exact reason string), price sanity (wrong-side stop/target, zero/NaN/infinite prices,
+  entry-price ceiling);
+- exposure limits, duplicate symbol (both prohibition and opt-in with exposure caps), daily
+  loss limit including the UTC day-roll regression and restart persistence through
+  `reconcile_journal`, max positions, kill switch end-to-end through `PaperTradingEngine`,
+  valuation-freshness strict mode;
+- config/env validation (every floor/ceiling fails at load when loosened) and `Config.describe`
+  key coverage;
+- `RiskDecision` audit completeness (all fields non-empty, code = first failing rule, limits
+  snapshot matches config);
+- pipeline integration: risk evaluated **exactly once** per intent (trail counting), adapter
+  never touched on rejection with the deciding code journaled, gate/connection checks still
+  enforced around risk, reason-string contracts, and a provider-agnostic source scan of
+  `backend/risk/*.py`.
+
+Verification (Phase 8): `395 passed, 150 subtests`; `tsc --noEmit` clean; `npm run build`
+succeeds; HTTP smoke passed (46 checks: accepted trade → position; reward:risk < 2, wrong-side
+stop, zero/missing stop, duplicate symbol, stale timestamp, tightened exposure, and kill switch
+each rejected with the right code while exactly 1 order row and 5 risk-decision rows reached the
+journal; owner emergency-stop/reset round trip; no secret in any response).
