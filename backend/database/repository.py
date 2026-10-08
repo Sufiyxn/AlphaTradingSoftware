@@ -48,37 +48,62 @@ class SQLiteJournalRepository:
             (order.order_id, order.created_at.isoformat(), order.request.symbol.strip().upper(),
              order.status.value, to_json(order)))
 
-    def record_order_fill(self, fill: Any, *, order_id: str | None = None,
-                          symbol: str | None = None) -> None:
-        """Record one execution exactly once.
+    def record_provider_fill(self, fill: Any, *, order_id: str | None = None,
+                             client_order_id: str | None = None,
+                             symbol: str | None = None,
+                             connection_id: str | None = None,
+                             provider_instance_id: str | None = None) -> bool:
+        """Persist one provider fill exactly once. ``True`` only if inserted.
 
-        ``INSERT OR IGNORE`` on the fill's platform identity is what makes a
-        replayed provider answer harmless: the same execution can be reported
-        any number of times and is still one row, so nothing double-counts
-        after a restart.
+        Uniqueness is the composite of the provider scope and the fill's own
+        durable identity - ``connection_id + provider_instance_id +
+        fill_id`` - because a number a provider hands out is only unique for
+        the connection that saw it: the same ``provider_fill_id`` observed on
+        two scopes is two different fills, and the same fill observed twice
+        in one scope is one fill. ``INSERT OR IGNORE`` is what makes replay
+        harmless; the rowcount is what tells the caller whether this call
+        inserted the row (``True``) or the journal already held it
+        (``False``) - the distinction checkpoint 3 will need.
+
+        A fill without a durable identity or a timestamp raises instead of
+        writing a row that could never be de-duplicated: identity is a
+        precondition of storage, not something storage patches up.
         """
-        identifier = getattr(fill, "fill_id", None)
-        if not identifier:
-            identifier = getattr(fill, "provider_fill_id", None)
-        if not identifier:
-            return  # an execution with no identity cannot be de-duplicated
-        owner = order_id or getattr(fill, "order_id", None)
-        if not owner:
-            return
+        identifier = str(getattr(fill, "fill_id", None) or "")
+        if not identifier.strip():
+            raise ValueError(
+                "a fill without a durable identity cannot be persisted")
         stamp = getattr(fill, "timestamp", None)
-        self._execute("""INSERT OR IGNORE INTO order_fills(
-                fill_id,order_id,timestamp,symbol,quantity,price,fee,
-                provider_fill_id,provider_order_id,context_json)
-            VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (identifier, owner, stamp.isoformat() if stamp else None,
-             (symbol or "").strip().upper() or None,
-             float(getattr(fill, "quantity", 0) or 0),
-             float(getattr(fill, "price", 0) or 0),
-             float(getattr(fill, "fee", 0) or 0),
-             getattr(fill, "provider_fill_id", None),
-             getattr(fill, "provider_order_id", None),
-             to_json({"order_id": owner, "side": (getattr(fill, "side", None).value
-                                                  if getattr(fill, "side", None) else None)})))
+        if stamp is None:
+            raise ValueError("a fill without a timestamp cannot be persisted")
+        side = getattr(fill, "side", None)
+        owner = order_id or getattr(fill, "order_id", None)
+        client = client_order_id or getattr(fill, "order_id", None)
+        values = (
+            str(connection_id or "").strip(),
+            str(provider_instance_id or "").strip(),
+            identifier,
+            str(client).strip() if client else None,
+            getattr(fill, "provider_order_id", None),
+            owner,
+            str(getattr(fill, "provider_fill_id", None) or "").strip() or None,
+            float(getattr(fill, "quantity", 0) or 0),
+            float(getattr(fill, "price", 0) or 0),
+            stamp.isoformat(),
+            float(getattr(fill, "fee", 0) or 0),
+            (str(symbol or "")).strip().upper() or None,
+            side.value if side is not None else None,
+            to_json({"order_id": owner,
+                     "side": side.value if side is not None else None}),
+        )
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """INSERT OR IGNORE INTO order_fill_journal(
+                    connection_id,provider_instance_id,fill_id,client_order_id,
+                    provider_order_id,order_id,provider_fill_id,quantity,price,
+                    timestamp,fee,symbol,side,context_json)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values)
+            return cursor.rowcount == 1
 
     def record_trade_open(self, trade: Any, *, setup: Any = None, risk: Any = None,
                           analysis: Any = None) -> None:
@@ -187,7 +212,7 @@ class SQLiteJournalRepository:
         specs = {
             "trades": ("trades", "COALESCE(exit_timestamp,entry_timestamp)", "symbol", ("context_json",)),
             "orders": ("orders", "timestamp", "symbol", ("context_json",)),
-            "fills": ("order_fills", "timestamp", "symbol", ("context_json",)),
+            "fills": ("order_fill_journal", "timestamp", "symbol", ("context_json",)),
             "signals": ("strategy_signals", "timestamp", "symbol", ("context_json",)),
             "risk_decisions": ("risk_decisions", "timestamp", "symbol", ("reasons_json", "context_json")),
             "ai_analyses": ("ai_analyses", "timestamp", "symbol", ("context_json",)),
@@ -283,6 +308,7 @@ class SQLiteJournalRepository:
             exit_price REAL, quantity REAL NOT NULL, pnl REAL, reward_risk_ratio REAL, context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS orders(order_id TEXT PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,status TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS order_fills(fill_id TEXT PRIMARY KEY,order_id TEXT NOT NULL,timestamp TEXT NOT NULL,symbol TEXT,quantity REAL NOT NULL,price REAL NOT NULL,fee REAL NOT NULL,provider_fill_id TEXT,provider_order_id TEXT,context_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS order_fill_journal(connection_id TEXT NOT NULL DEFAULT '',provider_instance_id TEXT NOT NULL DEFAULT '',fill_id TEXT NOT NULL,client_order_id TEXT,provider_order_id TEXT,order_id TEXT,provider_fill_id TEXT,quantity REAL NOT NULL,price REAL NOT NULL,timestamp TEXT NOT NULL,fee REAL NOT NULL,symbol TEXT,side TEXT,context_json TEXT NOT NULL,PRIMARY KEY(connection_id,provider_instance_id,fill_id));
         CREATE TABLE IF NOT EXISTS strategy_signals(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,strategy TEXT NOT NULL,direction TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS risk_decisions(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,approved INTEGER NOT NULL,reasons_json TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ai_analyses(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT NOT NULL,recommendation TEXT NOT NULL,score REAL NOT NULL,context_json TEXT NOT NULL);
@@ -293,6 +319,8 @@ class SQLiteJournalRepository:
         CREATE TABLE IF NOT EXISTS connection_instances(connection_id TEXT PRIMARY KEY,instance_id TEXT NOT NULL,created_at TEXT NOT NULL,next_sequence INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS ix_trades_exit ON trades(exit_timestamp);
         CREATE INDEX IF NOT EXISTS ix_fills_order ON order_fills(order_id);
+        CREATE INDEX IF NOT EXISTS ix_fill_journal_order ON order_fill_journal(order_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_fill_journal_provider ON order_fill_journal(connection_id,provider_instance_id,provider_fill_id) WHERE provider_fill_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS ix_events_timestamp ON system_events(timestamp);
         CREATE INDEX IF NOT EXISTS ix_errors_timestamp ON errors(timestamp);
         """

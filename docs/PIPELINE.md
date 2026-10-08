@@ -54,9 +54,12 @@ signal source (TradingView alert | scanner cycle | internal)
                                      / ORDER_*_FILL
       10. normalize status        - fill states with quantity > 0 -> ACCEPTED, open states ->
                                      SUBMITTED, anything else -> PROVIDER_EXECUTION_REJECTION
-      11. journal                 - record_risk_decision, record_order, record_order_fill,
+      11. journal                 - record_risk_decision, record_provider_fill then
+                                     record_order (a fill write that fails raises
+                                     FillPersistenceError before the fill is merged),
                                      EXECUTION_SUBMITTED / EXECUTION_REJECTED /
-                                     EXECUTION_DUPLICATE (journal errors never block trading)
+                                     EXECUTION_DUPLICATE (other journal errors never
+                                     block trading)
       12. PipelineResult          - code, reason, risk, order (the canonical backend.orders.Order),
                                      setup, connection_id, provider_id, mode, source, safety
                                      evidence

@@ -82,6 +82,28 @@ remaining_quantity = max(0, intent.quantity − filled_quantity)
   terminal status itself is not rewritten.
 - Submitting an order creates no fill at all.
 
+### Durable fill identity (Phase 10 checkpoint 2)
+
+Every fill is given exactly one durable identity before it is merged, journaled, or compared
+(`backend/execution/fill_identity.py`):
+
+- The provider's own number (`provider_fill_id`) is adopted verbatim when the provider supplied
+  one — the paper venue stamps `<provider_order_id>-F<n>` itself — and otherwise the identity is
+  the deterministic `FILL-<sha256>` of `client_order_id + provider_order_id + quantity + price +
+  timestamp` over a documented canonical serialization, so the same execution derives the same
+  identity after a JSON round trip and after a restart. A random identifier is never used.
+- The identity is scoped `<connection_id>:<provider_instance_id>:<key>` — the same scope
+  checkpoint 1 gave provider order identities — because a provider number is only unique for the
+  connection that saw it: one number on two scopes is two fills, and the same fill twice in one
+  scope is one fill.
+- Identity is assigned once, in `with_fills`, the single door fills enter through, and is never
+  re-derived or rewritten afterwards.
+- Persistence is fail-closed. `record_provider_fill` returns whether it actually inserted the
+  row, and a fill the journal refuses raises `FillPersistenceError` **before** the fill is
+  merged — in `record_fill`, in `apply_provider_order`, and on the cancellation path — so a fill
+  that is not durable is never visible in the order, in the API, or in the `orders` row a
+  restart rebuilds from.
+
 ## Open orders reserve risk capacity
 
 An order that has been submitted but not (fully) filled commits capital the moment it fills, so
@@ -124,9 +146,14 @@ capacity.
 | `RECONCILIATION_DISCREPANCY` | the two sides disagree, or the provider could not be read |
 | `RECONCILIATION_CLEAN` | a complete, error-free, difference-free comparison |
 
-Orders are upserted into the `orders` table (`context_json` = the serialized order) and fills
-into `order_fills` with `INSERT OR IGNORE` on the fill's own identity, so a replayed provider
-answer is still exactly one row.
+Orders are upserted into the `orders` table (`context_json` = the serialized order) and provider
+fills into `order_fill_journal`, whose primary key is `(connection_id, provider_instance_id,
+fill_id)` with a partial unique index on `(connection_id, provider_instance_id,
+provider_fill_id)`, written with `INSERT OR IGNORE` — so a replayed provider answer is still
+exactly one row, and the insert's rowcount tells the caller whether the fill was new. The fills
+are written *before* the order row that `restore` rebuilds from, so a refused fill cannot be
+resurrected by a restart. The phase 9 `order_fills` table is left exactly as it was: checkpoint 2
+adds a durable home for fills instead of migrating an existing one.
 
 ### A failed submission records no order
 
@@ -257,3 +284,12 @@ recovers open orders after a restart.
   re-exports the canonical vocabulary.
 
 Verification (Phase 9): `467 passed, 150 subtests`.
+
+`backend/tests/test_provider_fills.py` (23 tests) holds Phase 10 checkpoint 2: the provider's own
+fill number adopted verbatim, the deterministic `FILL-` fallback, scope qualification and its
+stability across serialization and a restart, one durable row per fill per provider scope, the
+insert's new-vs-replay answer, and fail-closed persistence — including a fill refused during a
+cancellation never becoming visible in the order, in the API, or in the row a restart rebuilds
+from.
+
+Verification (Phase 10 checkpoint 2): `509 passed, 150 subtests`.

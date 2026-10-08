@@ -13,10 +13,17 @@ Two rules hold everywhere:
   behind it. If a provider reports a filled quantity larger than the sum of
   the fills it gave us, that gap is a discrepancy to journal - never a fill to
   invent.
+
+Every fill that enters an order through :func:`with_fills` is given its
+durable identity first (see :mod:`backend.execution.fill_identity`), because
+this module is the one door fills come through - the service, the pipeline,
+and cancellation all merge through here.
 """
 from __future__ import annotations
 
 from datetime import datetime
+
+from backend.execution.fill_identity import normalize_fill
 
 from .models import (
     Fill,
@@ -93,14 +100,23 @@ def with_fills(order: Order, fills: tuple[Fill, ...], now: datetime, *,
                provider_order_id: str | None = None) -> Order:
     """Replace the recorded fills and recompute executed quantity/average.
 
-    Fills are de-duplicated by the provider's own fill identifier when it has
-    one and by the platform's identifier otherwise, so replaying the same
+    Each fill is first given its durable identity - scoped to the owning
+    order's connection and provider instance - unless it already carries
+    one, because this is the moment a fill enters canonical state and the
+    only moment identity can be assigned without ambiguity. Fills are then
+    de-duplicated by the provider's own fill identifier when it has one and
+    by the platform's durable identity otherwise, so replaying the same
     execution twice cannot double-count a position.
     """
     identity = provider_order_id if provider_order_id is not None else order.provider_order_id
     merged: list[Fill] = []
     seen: set[str] = set()
     for fill in fills:
+        fill = normalize_fill(fill,
+                              connection_id=order.connection_id,
+                              provider_instance_id=order.provider_instance_id,
+                              client_order_id=order.client_order_id,
+                              provider_order_id=identity)
         key = fill.provider_fill_id or fill.fill_id
         if key is not None:
             if key in seen:

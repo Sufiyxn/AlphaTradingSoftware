@@ -29,6 +29,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from backend.execution.fill_identity import normalize_fill
 from backend.execution.models import OrderStatus
 from backend.portfolio.models import Position
 
@@ -46,9 +47,30 @@ from .store import OrderStore
 
 __all__ = [
     "ORDER_EVENTS",
+    "FillPersistenceError",
     "OrderLifecycleService",
     "ProviderIdentityCollision",
 ]
+
+
+class FillPersistenceError(RuntimeError):
+    """A provider fill could not be written to the durable fill journal.
+
+    Raised fail-closed: the fill is not merged into the canonical order and
+    the caller is told the write did not happen, instead of the platform
+    pretending an execution is durable when it is not. The identity of the
+    fill and the order it belongs to travel with the error, so the failure
+    is diagnosable without exposing anything secret.
+    """
+
+    def __init__(self, *, fill_id: str, order_id: str | None,
+                 reason: str) -> None:
+        self.fill_id = fill_id
+        self.order_id = order_id
+        self.reason = str(reason)
+        super().__init__(
+            f"provider fill {fill_id!r} for order {order_id!r} was not "
+            f"persisted: {self.reason}")
 
 
 class ProviderIdentityCollision(Exception):
@@ -216,16 +238,24 @@ class OrderLifecycleService:
 
     def apply_provider_order(self, order_id: str, provider_order: Any,
                              now: datetime | None = None) -> Order:
-        """Adopt a status (and any fills) the provider returned."""
+        """Adopt a status (and any fills) the provider returned.
+
+        Fills are identified and written to the durable fill journal *before*
+        they are merged: a fill that cannot be persisted never appears in the
+        canonical order as if it had been. A replayed fill is one harmless
+        ``INSERT OR IGNORE``, so reprocessing the same provider answer stays
+        one row.
+        """
         moment = now or self._clock()
         order = self.store.require(order_id)
         fills = tuple(getattr(provider_order, "fills", ()) or ())
         if fills:
-            order = with_fills(order, fills, moment,
-                               provider_order_id=_provider_id(provider_order)
-                               or order.provider_order_id)
+            identity = _provider_id(provider_order) or order.provider_order_id
+            fills = tuple(self._identify(order, fill, provider_order_id=identity)
+                          for fill in fills)
+            self._persist_fills(order, fills)
+            order = with_fills(order, fills, moment, provider_order_id=identity)
             self.store.save(order)
-            self._persist_fills(order)
         status = getattr(provider_order, "status", None)
         if isinstance(status, OrderStatus) and status is not order.status:
             order = self.apply_status(order_id, status, moment,
@@ -251,9 +281,14 @@ class OrderLifecycleService:
 
         The executed quantity is recomputed from the fills themselves; the
         order is never told it executed more than the executions it carries.
+        The fill is identified and persisted before it is merged, so a write
+        that fails surfaces as :class:`FillPersistenceError` instead of a
+        fill that only exists in memory.
         """
         moment = now or self._clock()
         order = self.store.require(order_id)
+        fill = self._identify(order, fill)
+        self._persist_fills(order, (fill,))
         updated = add_fill(order, fill, moment)
         implied = status_for_fill(updated, updated.filled_quantity)
         transition_ok = implied is None or can_transition(order.status, implied)
@@ -413,7 +448,14 @@ class OrderLifecycleService:
         self._event(now, event_type, message, symbol=order.symbol, context=payload)
 
     def _persist_order(self, order: Order) -> None:
-        """Write the order row and its fills. Never raises.
+        """Write the order row and its fills.
+
+        The row write never raises: an audit write must not mask a state
+        transition. The fill write is different - it is durability for real
+        executions, so its failures are propagated by :meth:`_persist_fills`
+        rather than swallowed. Fills are normally already durable from the
+        pre-merge write; this re-asserts them for callers (events, status
+        changes, cancellation) that persist a whole order at once.
 
         This is the durability half of a state change; the event half is
         journaled separately, so a component that journals its own outcome
@@ -422,23 +464,62 @@ class OrderLifecycleService:
         """
         if self._journal is None:
             return
+        # The fill write comes first on purpose: the order row serializes the
+        # fills too, and ``restore`` rebuilds from those rows - so a row
+        # written ahead of a failed fill write would resurrect an execution
+        # the fill journal refused. When the fills cannot be durable, the row
+        # that would carry them is never written.
+        self._persist_fills(order)
         try:
             self._journal.record_order(order)
-        except Exception:  # noqa: BLE001 - never let persistence mask a transition
+        except Exception:  # noqa: BLE001 - never let a row write mask a transition
             pass
-        self._persist_fills(order)
 
-    def _persist_fills(self, order: Order) -> None:
-        if self._journal is None or not order.fills:
+    def _persist_fills(self, order: Order,
+                       fills: tuple[Fill, ...] | None = None) -> None:
+        """Write provider fills to the durable fill journal, fail closed.
+
+        This is the only place a fill becomes durable. It raises
+        :class:`FillPersistenceError` rather than swallowing a journal
+        failure: a fill that could not be written must never look like one
+        that could. An already-written fill is simply ignored by the
+        journal's idempotent insert, so re-persisting an order's fills is
+        harmless. With no journal attached nothing is durable and nothing
+        pretends to be - the write is skipped, exactly like every other
+        persistence this service does.
+        """
+        pending = order.fills if fills is None else tuple(fills)
+        if self._journal is None or not pending:
             return
-        record = getattr(self._journal, "record_order_fill", None)
+        record = getattr(self._journal, "record_provider_fill", None)
         if record is None:
-            return
-        for fill in order.fills:
+            raise FillPersistenceError(
+                fill_id=pending[0].fill_id or "", order_id=order.client_order_id,
+                reason="this journal cannot store durable provider fills")
+        for fill in pending:
             try:
-                record(fill, order_id=order.client_order_id, symbol=order.symbol)
-            except Exception:  # noqa: BLE001 - a fill row must never block a fill
-                pass
+                record(fill, order_id=order.client_order_id,
+                       client_order_id=order.client_order_id,
+                       symbol=order.symbol,
+                       connection_id=order.connection_id,
+                       provider_instance_id=order.provider_instance_id)
+            except FillPersistenceError:
+                raise
+            except Exception as error:  # noqa: BLE001 - re-raised, never hidden
+                raise FillPersistenceError(
+                    fill_id=fill.fill_id or "", order_id=order.client_order_id,
+                    reason=error) from error
+
+    def _identify(self, order: Order, fill: Fill, *,
+                  provider_order_id: str | None = None) -> Fill:
+        """The fill with its durable identity, scoped to the owning order."""
+        return normalize_fill(fill,
+                              connection_id=order.connection_id,
+                              provider_instance_id=order.provider_instance_id,
+                              client_order_id=order.client_order_id,
+                              provider_order_id=(provider_order_id
+                                                 if provider_order_id is not None
+                                                 else order.provider_order_id))
 
     def _event(self, now: datetime, event_type: str, message: str, *,
                symbol: str | None = None, context: dict | None = None) -> None:

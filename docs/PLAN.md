@@ -42,7 +42,13 @@
 > `/api/orders/reconcile` expose it. Verification: `467 passed, 150 subtests`. Full detail:
 > `docs/ORDERS.md`.*
 > **Phase 10 has started: checkpoint 1 (durable provider-order identity) is implemented and
-> verified — `486 passed, 150 subtests` — checkpoints 2–6 have not started.**
+> verified — `486 passed, 150 subtests`; checkpoint 2 (durable fill identity + a durable fill
+> journal) is implemented and verified — `509 passed, 150 subtests`; `tsc --noEmit` clean;
+> `npm run build` succeeds; HTTP smoke passed with 16 checks (the four documented endpoints
+> parsed as JSON, one signed paper trade whose fill returns over HTTP carrying its
+> scope-qualified identity and the paper venue's own `-F<n>` number, cancel refused on a filled
+> order, reconcile, logs, and no secret in any response body) — checkpoints 3–6 have not
+> started.**
 
 ---
 
@@ -569,7 +575,9 @@ Delivered scope (as approved):
 - **persistence + restart** — `orders` rows (serialized order), a new `order_fills` table with
   `INSERT OR IGNORE` on the fill's own identity, `ORDER_*` / `RECONCILIATION_*` events, and
   `OrderLifecycleService.restore()` rebuilding open orders (and their reservations) from the
-  journal, automatically at construction and when a host attaches a journal later
+  journal, automatically at construction and when a host attaches a journal later. *(Phase 10
+  checkpoint 2 later moved durable fills to `order_fill_journal`, keyed by the provider scope as
+  well as the fill identity; `order_fills` itself is untouched.)*
 - **exposure** — `ApplicationRuntime.list_orders` / `cancel_order` / `reconcile_orders`,
   `GET /api/orders`, owner-guarded `POST /api/orders/cancel` (200/400/404/409) and
   `POST /api/orders/reconcile` (200, read-only)

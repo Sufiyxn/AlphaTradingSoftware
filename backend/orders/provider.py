@@ -172,7 +172,11 @@ def snapshot_from_adapter(adapter, *, now: datetime,
                     quantity=float(fill.quantity),
                     price=float(fill.price),
                     timestamp=fill.timestamp,
-                    provider_fill_id=fill.fill_id or None,
+                    # The provider's own number is what reconciliation
+                    # matches on; the platform's identity is only the
+                    # fallback for a fill the provider never identified.
+                    provider_fill_id=(getattr(fill, "provider_fill_id", None)
+                                      or getattr(fill, "fill_id", None) or None),
                     provider_order_id=str(getattr(order, "order_id", "") or ""),
                     fee=float(getattr(fill, "fee", 0) or 0),
                     side=getattr(fill, "side", None),

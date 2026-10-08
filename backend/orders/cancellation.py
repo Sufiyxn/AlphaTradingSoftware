@@ -165,17 +165,21 @@ class OrderCanceller:
 
     # -- internals --------------------------------------------------------
     def _save(self, order: Order) -> Order:
-        """Store the order in memory and write its durable row alongside it.
+        """Write the durable row first, then store the order in memory.
 
         The store is process-local; ``persist`` is what makes a cancellation
-        survive the restart that usually follows it. Writing both in one call
-        keeps the status the API reports and the status a fresh process would
-        rebuild from the journal identical.
+        survive the restart that usually follows it, so it runs *before* the
+        store is updated: an answer that carries fills cannot become visible
+        in memory unless those fills were durably written first. If the write
+        fails, :class:`~backend.orders.service.FillPersistenceError` escapes
+        with the store still holding the pre-cancellation order - never a
+        fill the process shows but the journal never received. The status the
+        API reports and the status a fresh process would rebuild from the
+        journal stay identical either way.
         """
-        saved = self._store.save(order)
         if self._persist is not None:
-            self._persist(saved)
-        return saved
+            self._persist(order)
+        return self._store.save(order)
 
     def _adopt(self, order: Order, provider_order: Any, now: datetime) -> CancellationResult:
         status = _status_of(provider_order)

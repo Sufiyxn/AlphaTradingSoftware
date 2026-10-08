@@ -46,7 +46,12 @@ from .reconcile import (
     ReconcileStatus,
     ReconciliationReport,
 )
-from .service import ORDER_EVENTS, OrderLifecycleService, ProviderIdentityCollision
+from .service import (
+    ORDER_EVENTS,
+    FillPersistenceError,
+    OrderLifecycleService,
+    ProviderIdentityCollision,
+)
 from .store import OrderStore
 
 __all__ = [
@@ -55,6 +60,7 @@ __all__ = [
     "CancellationResult",
     "DiscrepancyKind",
     "Fill",
+    "FillPersistenceError",
     "InvalidOrderTransition",
     "Order",
     "OrderCanceller",
