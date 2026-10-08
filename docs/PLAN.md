@@ -39,7 +39,7 @@
 > reconciler is read-only and only reports `MATCH` for a complete, error-free snapshot; every
 > cancellation attempt has its own outcome; orders/fills/lifecycle events are journaled and
 > rebuilt after a restart; `GET /api/orders` and owner-guarded `POST /api/orders/cancel`,
-> `/api/orders/reconcile` expose it. Verification: `462 passed, 150 subtests`. Full detail:
+> `/api/orders/reconcile` expose it. Verification: `467 passed, 150 subtests`. Full detail:
 > `docs/ORDERS.md`.*
 > **Phase 10 has not started.***
 
@@ -520,8 +520,8 @@ Delivered scope (was the future-phase scope below):
 
 ### PHASE 9 — Order Lifecycle Management & Reconciliation · **DONE (COMMITTED)**
 
-> Implemented and verified (`462 passed, 150 subtests` — `backend/tests/test_order_lifecycle.py`
-> adds 66 tests on top of the Phase 1–8 suites; `tsc --noEmit` clean; `npm run build` succeeds;
+> Implemented and verified (`467 passed, 150 subtests` — `backend/tests/test_order_lifecycle.py`
+> adds 71 tests on top of the Phase 1–8 suites; `tsc --noEmit` clean; `npm run build` succeeds;
 > HTTP smoke passed; no secret in any response) and committed as
 > `Complete phase 9 order lifecycle and reconciliation`. Full detail: `docs/ORDERS.md`.
 

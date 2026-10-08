@@ -72,7 +72,8 @@ class OrderLifecycleService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.reconciler = OrderReconciler(self.store)
         self.canceller = OrderCanceller(self.store, executor=executor,
-                                        journal=journal, clock=self._clock)
+                                        journal=journal, clock=self._clock,
+                                        persist=self._persist_order)
         self.restored_count = 0
         if restore and journal is not None:
             self.restored_count = self.restore()
@@ -296,7 +297,8 @@ class OrderLifecycleService:
         """
         self._journal = journal
         self.canceller = OrderCanceller(self.store, executor=self._executor,
-                                        journal=journal, clock=self._clock)
+                                        journal=journal, clock=self._clock,
+                                        persist=self._persist_order)
         self.restored_count = self.restore() if journal is not None else 0
 
     def restore(self) -> int:
@@ -325,12 +327,24 @@ class OrderLifecycleService:
         payload = {"order_id": order.client_order_id}
         if context:
             payload.update(context)
+        self._persist_order(order)
+        self._event(now, event_type, message, symbol=order.symbol, context=payload)
+
+    def _persist_order(self, order: Order) -> None:
+        """Write the order row and its fills. Never raises.
+
+        This is the durability half of a state change; the event half is
+        journaled separately, so a component that journals its own outcome
+        (the canceller) writes its row exactly once and its event exactly
+        once instead of doubling either.
+        """
+        if self._journal is None:
+            return
         try:
             self._journal.record_order(order)
         except Exception:  # noqa: BLE001 - never let persistence mask a transition
             pass
         self._persist_fills(order)
-        self._event(now, event_type, message, symbol=order.symbol, context=payload)
 
     def _persist_fills(self, order: Order) -> None:
         if self._journal is None or not order.fills:

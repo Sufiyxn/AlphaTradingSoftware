@@ -194,6 +194,17 @@ reserved, stays visible), and a `NEW` order is closed locally without any provid
 nothing was ever handed over. Each attempt journals `ORDER_CANCELLED` or
 `ORDER_CANCELLATION_FAILED`.
 
+Who calls the provider: the pipeline supplies the executor. `_ConnectionExecutor`
+(`backend/pipeline/service.py`) resolves the order's own connection in the shared store, asks the
+`ConnectionManager` for that connection's verified adapter, and calls `cancel_order` on it — so a
+submitted order is cancelled at the provider first and marked `CANCELLED` locally second. A
+connection with no verified adapter raises into a `PROVIDER_ERROR`; it never closes the order
+locally as if it had succeeded.
+
+Every state change the canceller applies is written back to `journal.rows("orders")` in the same
+call that changes it, so a restart cannot resurrect a cancelled order or leave it holding a
+reservation. A cancellation that failed to reach the provider writes no row at all.
+
 ## Restart recovery
 
 `OrderLifecycleService.restore()` rebuilds the store from `journal.rows("orders")` — later rows
@@ -216,7 +227,7 @@ recovers open orders after a restart.
 
 ## Tests
 
-`backend/tests/test_order_lifecycle.py` (66 tests):
+`backend/tests/test_order_lifecycle.py` (71 tests):
 
 - **state machine** — the documented chain, every terminal status final, illegal transitions
   raising, idempotent re-application, `UNKNOWN` recovery, and the `NEW` vs provider-"new"
@@ -232,8 +243,9 @@ recovers open orders after a restart.
   released on fill, and two concurrent intents sizing against the same open orders;
 - **pending reservations** — sizing terms shrinking with reserved notional, price-less
   reservations still holding their symbol, terminal orders reserving nothing;
-- **cancellation** — all six outcomes, idempotency, and "a provider failure never changes local
-  state";
+- **cancellation** — all six outcomes, idempotency, "a provider failure never changes local
+  state", the pipeline's own service reaching the connection adapter, and a cancelled order
+  staying cancelled (with no reservation) across a restart;
 - **reconciliation** — `MATCH`, status/quantity drift, `PROVIDER_ERROR`/`INCOMPLETE` never a
   match, missing/unknown/duplicate orders, missing provider fills, terminal-vs-open, position
   drift only with a book, no mutation, and journaling;
@@ -244,4 +256,4 @@ recovers open orders after a restart.
 - **architecture** — `backend/orders/**` never contains `place_order(`, and the package
   re-exports the canonical vocabulary.
 
-Verification (Phase 9): `462 passed, 150 subtests`.
+Verification (Phase 9): `467 passed, 150 subtests`.

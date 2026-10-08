@@ -610,6 +610,62 @@ class CancellationTests(unittest.TestCase):
             journal.close()
 
 
+class ProductionCancellationWiringTests(unittest.TestCase):
+    """The pipeline's own lifecycle service must be able to reach a provider.
+
+    Unit cancellations hand the service a fake executor; production does not.
+    These build the real ``TradingPipeline`` (the constructor every host uses)
+    so a cancellation that never leaves the process fails here instead of in
+    someone's trading session.
+    """
+
+    def build(self):
+        pipeline, manager, adapter, _risk, _gate = make_pipeline(
+            adapter=ScriptedAdapter(authenticated=True, clock=CLOCK))
+        return pipeline, adapter
+
+    def submit(self, pipeline) -> Order:
+        result = pipeline.execute(make_intent(setup=trade_setup("ABC"),
+                                              limit_price=100.0,
+                                              requested_quantity=10))
+        self.assertIs(result.code, PipelineCode.SUBMITTED,
+                      (result.code, result.reason))
+        return result.order
+
+    def test_cancelling_a_submitted_order_reaches_the_connection_adapter(self):
+        pipeline, adapter = self.build()
+        order = self.submit(pipeline)
+        self.assertIs(pipeline.orders.get(order.client_order_id).status,
+                      OrderStatus.SUBMITTED)
+
+        outcome = pipeline.orders.cancel(order.client_order_id)
+
+        self.assertIs(outcome.outcome, CancellationOutcome.CANCELLED,
+                      outcome.message)
+        self.assertIs(adapter.get_order(order.provider_order_id).status,
+                      OrderStatus.CANCELLED,
+                      "the provider must actually be told to cancel")
+        self.assertIs(pipeline.orders.get(order.client_order_id).status,
+                      OrderStatus.CANCELLED)
+        self.assertEqual(pipeline.orders.pending_reservations(), (),
+                         "a cancelled order frees its reservation")
+
+    def test_a_connection_without_a_verified_adapter_reports_a_provider_error(self):
+        pipeline, _adapter = self.build()
+        created = pipeline.orders.create(order_intent(),
+                                         connection_id="not-connected")
+        pipeline.orders.mark_submitted(created.client_order_id, "PROV-UNKNOWN")
+
+        outcome = pipeline.orders.cancel(created.client_order_id)
+
+        self.assertIs(outcome.outcome, CancellationOutcome.PROVIDER_ERROR)
+        self.assertIn("no verified execution adapter", outcome.message)
+        self.assertIs(pipeline.orders.get(created.client_order_id).status,
+                      OrderStatus.SUBMITTED)
+        self.assertEqual(len(pipeline.orders.pending_reservations()), 1,
+                         "an uncancelable order stays open and reserved")
+
+
 class ReconciliationTests(unittest.TestCase):
     def build(self, *, status=OrderStatus.ACCEPTED, filled=0.0,
               provider_order_id="PROV-1", client="CLIENT-1"):
@@ -851,6 +907,59 @@ class PersistenceAndRestartTests(unittest.TestCase):
             self.assertEqual(len(restarted.pending_reservations()), 1)
             self.assertEqual(restarted.pending_reservations()[0].remaining_quantity,
                              100.0)
+        finally:
+            journal.close()
+
+    def test_a_cancelled_order_stays_cancelled_across_a_restart(self):
+        journal = SQLiteJournalRepository(":memory:")
+        try:
+            first = service(journal, executor=RecordingExecutor())
+            order = submitted_order(first, client="CANCEL-1",
+                                    status=OrderStatus.ACCEPTED)
+            outcome = first.cancel(order.client_order_id)
+            self.assertIs(outcome.outcome, CancellationOutcome.CANCELLED)
+
+            restarted = OrderLifecycleService(journal=journal, clock=CLOCK)
+            restored = restarted.get("CANCEL-1")
+            self.assertIsNotNone(restored)
+            self.assertIs(restored.status, OrderStatus.CANCELLED,
+                          "a cancelled order must not come back open")
+            self.assertEqual(restarted.pending_reservations(), (),
+                             "a cancelled order must not keep holding capacity")
+        finally:
+            journal.close()
+
+    def test_an_order_cancelled_before_submission_is_persisted_too(self):
+        journal = SQLiteJournalRepository(":memory:")
+        try:
+            first = service(journal, executor=RecordingExecutor())
+            created = first.create(order_intent("CANCEL-2"))
+            self.assertIs(first.cancel(created.client_order_id).outcome,
+                          CancellationOutcome.CANCELLED)
+
+            restarted = OrderLifecycleService(journal=journal, clock=CLOCK)
+            self.assertIs(restarted.get("CANCEL-2").status,
+                          OrderStatus.CANCELLED)
+            self.assertEqual(restarted.pending_reservations(), ())
+        finally:
+            journal.close()
+
+    def test_a_cancellation_that_failed_persists_nothing(self):
+        journal = SQLiteJournalRepository(":memory:")
+        try:
+            first = service(journal, executor=RecordingExecutor(
+                raises=ConnectionError("no route to provider")))
+            order = submitted_order(first, client="CANCEL-3",
+                                    status=OrderStatus.ACCEPTED)
+            self.assertIs(first.cancel(order.client_order_id).outcome,
+                          CancellationOutcome.PROVIDER_ERROR)
+
+            restarted = OrderLifecycleService(journal=journal, clock=CLOCK)
+            restored = restarted.get("CANCEL-3")
+            self.assertIs(restored.status, OrderStatus.ACCEPTED,
+                          "a failed cancellation must not write a terminal row")
+            self.assertEqual(len(restarted.pending_reservations()), 1,
+                             "an order we could not cancel still reserves")
         finally:
             journal.close()
 

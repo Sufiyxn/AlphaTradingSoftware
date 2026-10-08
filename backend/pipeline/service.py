@@ -49,7 +49,7 @@ from backend.execution.models import (
     OrderType,
     normalize_order_status,
 )
-from backend.orders import Order, OrderIntent, OrderLifecycleService
+from backend.orders import Order, OrderIntent, OrderLifecycleService, OrderStore
 from backend.portfolio import Portfolio
 from backend.portfolio.models import PortfolioSnapshot
 from backend.risk import RiskEngine
@@ -85,6 +85,35 @@ class _Request:
     idempotency_key: str | None
 
 
+class _ConnectionExecutor:
+    """The production answer to the canceller's ``cancel_order`` protocol.
+
+    ``OrderCanceller`` only knows a provider order id; this resolves which
+    connection that order lives on (through the shared store), asks the
+    ``ConnectionManager`` for that connection's verified adapter, and hands the
+    cancellation over - so cancelling works on every connection the manager
+    holds, not just the pipeline's default. An order whose connection has no
+    verified adapter yet raises, which the canceller reports honestly as a
+    ``PROVIDER_ERROR`` instead of a silent local close.
+    """
+
+    def __init__(self, store: OrderStore, connections: ConnectionManager,
+                 default_connection_id: str) -> None:
+        self._store = store
+        self._connections = connections
+        self._default_connection_id = default_connection_id
+
+    def cancel_order(self, provider_order_id: str):
+        order = self._store.find_by_provider_order_id(provider_order_id)
+        connection_id = ((order.connection_id if order is not None else None)
+                         or self._default_connection_id)
+        adapter = self._connections.adapter_for(connection_id)
+        if adapter is None:
+            raise RuntimeError(
+                f"connection {connection_id} has no verified execution adapter")
+        return adapter.cancel_order(provider_order_id)
+
+
 class TradingPipeline:
     """Evaluates risk, safety, and readiness, then submits through one adapter."""
 
@@ -103,7 +132,11 @@ class TradingPipeline:
         #: intent in front of it has already committed.
         self.submission_lock = threading.RLock()
         self._completed: dict[str, PipelineResult] = {}
-        self.orders = OrderLifecycleService(journal=None, clock=clock, restore=False)
+        store = OrderStore()
+        self.orders = OrderLifecycleService(
+            store, journal=None, clock=clock, restore=False,
+            executor=_ConnectionExecutor(store, self._connections,
+                                         self._default_connection_id))
         self._journal = None
         self.journal = journal
 

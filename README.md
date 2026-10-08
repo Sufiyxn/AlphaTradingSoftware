@@ -98,6 +98,6 @@ cd frontend
 npm run build
 ```
 
-Expected: `462 passed, 150 subtests` on the backend (including `backend/tests/test_risk_hardening.py` and `backend/tests/test_order_lifecycle.py`), and a successful frontend type-check/build with no changes required for Phase 9 (orders travel the existing API surface).
+Expected: `467 passed, 150 subtests` on the backend (including `backend/tests/test_risk_hardening.py` and `backend/tests/test_order_lifecycle.py`), and a successful frontend type-check/build with no changes required for Phase 9 (orders travel the existing API surface).
 
 SQLite journal data is stored under `data/alpha_trading.sqlite3` by default and is ignored by Git. Override `DATABASE_PATH` to use a different local file. Secrets belong only in `.env`; `.env` is ignored and `.env.example` contains no credentials.

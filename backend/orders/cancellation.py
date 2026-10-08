@@ -83,14 +83,21 @@ class OrderCanceller:
     (the execution router or a single adapter). It is optional: without one
     every attempt reports ``PROVIDER_ERROR`` and local state is untouched,
     which is the honest answer for a process that is not connected.
+
+    ``persist`` writes the order back to the durable journal in the same call
+    that changes it (the lifecycle service supplies this). It is optional for
+    callers that only want the in-memory store, but a production cancellation
+    without it would be undone by the next restart.
     """
 
     def __init__(self, store: OrderStore, *, executor: Any | None = None,
                  journal: Any | None = None,
-                 clock: Callable[[], datetime] | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None,
+                 persist: Callable[[Order], None] | None = None) -> None:
         self._store = store
         self._executor = executor
         self._journal = journal
+        self._persist = persist
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def cancel(self, order_id: str) -> CancellationResult:
@@ -125,7 +132,7 @@ class OrderCanceller:
         if order.status is OrderStatus.NEW:
             # Nothing was ever handed to a provider, so there is nothing to
             # cancel remotely - closing it locally is the whole operation.
-            cancelled = self._store.apply(order, OrderStatus.CANCELLED, now)
+            cancelled = self._save(with_status(order, OrderStatus.CANCELLED, now))
             return self._record(CancellationResult(
                 outcome=CancellationOutcome.CANCELLED,
                 order_id=cancelled.client_order_id,
@@ -157,6 +164,19 @@ class OrderCanceller:
         return self._adopt(order, provider_order, now)
 
     # -- internals --------------------------------------------------------
+    def _save(self, order: Order) -> Order:
+        """Store the order in memory and write its durable row alongside it.
+
+        The store is process-local; ``persist`` is what makes a cancellation
+        survive the restart that usually follows it. Writing both in one call
+        keeps the status the API reports and the status a fresh process would
+        rebuild from the journal identical.
+        """
+        saved = self._store.save(order)
+        if self._persist is not None:
+            self._persist(saved)
+        return saved
+
     def _adopt(self, order: Order, provider_order: Any, now: datetime) -> CancellationResult:
         status = _status_of(provider_order)
         if status is None:
@@ -173,7 +193,7 @@ class OrderCanceller:
                                  f"the provider answered {status.value}, which this "
                                  f"order cannot move to from {order.status.value}",
                                  now)
-        self._store.save(updated)
+        self._save(updated)
 
         if status is OrderStatus.CANCELLED:
             outcome = CancellationOutcome.CANCELLED

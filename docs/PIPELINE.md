@@ -282,7 +282,7 @@ there is no direct-to-adapter path even in tests.
   enforced around risk, reason-string contracts, and a provider-agnostic source scan of
   `backend/risk/*.py`.
 
-`backend/tests/test_order_lifecycle.py` (Phase 9, 66 tests):
+`backend/tests/test_order_lifecycle.py` (Phase 9, 71 tests):
 
 - the state machine itself (legal chain, terminal statuses final, illegal moves raising,
   idempotent re-application, `UNKNOWN` recovery, provider "new" ≠ local `NEW`);
@@ -294,7 +294,8 @@ there is no direct-to-adapter path even in tests.
   order, a failed submission leaving no order, risk rejections never reaching the store,
   duplicate-symbol and max-position reservations, capacity released on fill, concurrent
   intents sizing against the same open orders);
-- cancellation (all six outcomes, idempotency, provider failure leaving local state alone);
+- cancellation (all six outcomes, idempotency, provider failure leaving local state alone, the
+  pipeline's executor reaching the connection adapter, and a cancellation surviving a restart);
 - reconciliation (`MATCH`, drift, `PROVIDER_ERROR`/`INCOMPLETE` never a match, missing/unknown/
   duplicate orders, missing provider fills, position drift only with a book, no mutation);
 - persistence (order/fill/event rows, restart restore, concurrent store writes) and the
@@ -307,5 +308,5 @@ stop, zero/missing stop, duplicate symbol, stale timestamp, tightened exposure, 
 each rejected with the right code while exactly 1 order row and 5 risk-decision rows reached the
 journal; owner emergency-stop/reset round trip; no secret in any response).
 
-Verification (Phase 9): `462 passed, 150 subtests`; `tsc --noEmit` clean; `npm run build`
+Verification (Phase 9): `467 passed, 150 subtests`; `tsc --noEmit` clean; `npm run build`
 succeeds; HTTP smoke passed; no secret in any response.
