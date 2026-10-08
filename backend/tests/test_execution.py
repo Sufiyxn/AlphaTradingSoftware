@@ -16,7 +16,9 @@ class ExecutionTests(unittest.TestCase):
         request = OrderRequest("ABC", Direction.LONG, 10, 100)
         order = provider.place_order(request)
         self.assertEqual(order.status, OrderStatus.FILLED)
-        self.assertEqual(order.order_id, "MOCK-000001")
+        # The identity names this adapter instance and its first order, so a
+        # second adapter (or a second run) can never mint the same one.
+        self.assertRegex(order.order_id, r"^MOCK-[0-9a-f]{8}-000001$")
         self.assertEqual(provider.get_order(order.order_id), order)
         self.assertEqual(provider.cancel_order(order.order_id).status, OrderStatus.CANCELLED)
 
@@ -29,7 +31,12 @@ class ExecutionTests(unittest.TestCase):
     def test_repeatable_timestamps_and_snapshots(self):
         first = MockExecutionProvider().place_order(OrderRequest("X", Direction.LONG, 1, 10))
         second = MockExecutionProvider().place_order(OrderRequest("X", Direction.LONG, 1, 10))
-        self.assertEqual(first, second)
+        self.assertEqual(first.request, second.request)
+        self.assertEqual((first.status, first.filled_quantity, first.fills),
+                         (second.status, second.filled_quantity, second.fills))
+        self.assertEqual(first.created_at, second.created_at)
+        self.assertNotEqual(first.order_id, second.order_id,
+                            "two adapter instances must never share an order identity")
 
     def test_registry_router_and_normalized_account_quote_and_position_views(self):
         registry = AdapterRegistry()
@@ -94,7 +101,9 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(replaced.request.quantity, 3)
         self.assertEqual(replaced.status, OrderStatus.FILLED)
         self.assertEqual(router.cancel_order(original.order_id).status, OrderStatus.CANCELLED)
-        self.assertEqual(router.place_order(OrderRequest("ABC", Direction.LONG, 1, 10)).order_id, "MOCK-000002")
+        self.assertRegex(
+            router.place_order(OrderRequest("ABC", Direction.LONG, 1, 10)).order_id,
+            r"^MOCK-[0-9a-f]{8}-000002$")
 
     def test_registry_rejects_duplicate_and_reports_unknown_adapter(self):
         registry = AdapterRegistry()

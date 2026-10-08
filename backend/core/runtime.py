@@ -71,6 +71,9 @@ class ApplicationRuntime:
             registry=self.execution_providers, clock=self.clock,
             gate=self.execution_gate,
             factory_kwargs={"cash": trading.paper_starting_cash},
+            # The provider instance each connection mints order identities
+            # under is durable: a restart recovers it instead of reusing it.
+            journal=self.repository,
         )
         self.connection_manager.add(
             connection_id="paper", provider_id="local_paper",

@@ -398,6 +398,7 @@ class RejectionCodeTests(unittest.TestCase):
             PipelineCode.PROVIDER_AUTH_FAILURE, PipelineCode.PROVIDER_TIMEOUT,
             PipelineCode.PROVIDER_RATE_LIMIT,
             PipelineCode.PROVIDER_EXECUTION_REJECTION,
+            PipelineCode.PROVIDER_ID_COLLISION,
         }
         self.assertEqual(set(ALL_CODES), exercised)
 

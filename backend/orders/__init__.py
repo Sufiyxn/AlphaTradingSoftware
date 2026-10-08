@@ -46,7 +46,7 @@ from .reconcile import (
     ReconcileStatus,
     ReconciliationReport,
 )
-from .service import ORDER_EVENTS, OrderLifecycleService
+from .service import ORDER_EVENTS, OrderLifecycleService, ProviderIdentityCollision
 from .store import OrderStore
 
 __all__ = [
@@ -63,6 +63,7 @@ __all__ = [
     "OrderReconciler",
     "OrderStatus",
     "OrderStore",
+    "ProviderIdentityCollision",
     "ProviderStateClient",
     "ProviderStateSnapshot",
     "ReconcileDiscrepancy",

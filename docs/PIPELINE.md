@@ -179,7 +179,7 @@ What the pipeline adds to the risk story:
 ## Rejection codes
 
 `PipelineCode` (`backend/pipeline/models.py`) is the stable machine vocabulary; `ALL_CODES`
-lists all 17 and a test asserts the set never drifts silently.
+lists all 18 and a test asserts the set never drifts silently.
 
 | Code | Meaning |
 |---|---|
@@ -200,6 +200,7 @@ lists all 17 and a test asserts the set never drifts silently.
 | `PROVIDER_TIMEOUT` | The adapter timed out at submission. |
 | `PROVIDER_RATE_LIMIT` | The adapter throttled the request. |
 | `PROVIDER_EXECUTION_REJECTION` | The provider answered but did not fill the order. |
+| `PROVIDER_ID_COLLISION` | The provider's order identity is already owned by another local order; it was not registered. |
 
 ## How each signal path maps the result
 

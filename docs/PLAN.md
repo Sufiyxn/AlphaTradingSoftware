@@ -41,7 +41,8 @@
 > rebuilt after a restart; `GET /api/orders` and owner-guarded `POST /api/orders/cancel`,
 > `/api/orders/reconcile` expose it. Verification: `467 passed, 150 subtests`. Full detail:
 > `docs/ORDERS.md`.*
-> **Phase 10 has not started.***
+> **Phase 10 has started: checkpoint 1 (durable provider-order identity) is implemented and
+> verified — `486 passed, 150 subtests` — checkpoints 2–6 have not started.**
 
 ---
 

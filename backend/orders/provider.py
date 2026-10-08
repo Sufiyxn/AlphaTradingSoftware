@@ -101,6 +101,11 @@ class ProviderStateSnapshot:
     retrieved_at: datetime | None = None
     connection_id: str | None = None
     provider_id: str | None = None
+    #: The provider instance that produced this view. Together with the
+    #: connection it scopes every order identity in it: a number that looks
+    #: like one we hold may have been minted by a different instance, and the
+    #: reconciler must never assume otherwise.
+    provider_instance_id: str | None = None
 
     @property
     def is_usable(self) -> bool:
@@ -132,10 +137,14 @@ def snapshot_from_adapter(adapter, *, now: datetime,
     """
     from backend.execution.models import normalize_order_status
 
+    instance_id = getattr(adapter, "provider_instance_id", None)
+    instance_id = str(instance_id) if instance_id else None
+
     def _fail(message: str) -> ProviderStateSnapshot:
         return ProviderStateSnapshot(error=message, complete=False,
                                      retrieved_at=now, connection_id=connection_id,
-                                     provider_id=provider_id)
+                                     provider_id=provider_id,
+                                     provider_instance_id=instance_id)
 
     reader = getattr(adapter, "get_orders", None)
     if not callable(reader):
@@ -152,6 +161,7 @@ def snapshot_from_adapter(adapter, *, now: datetime,
                 quantity=float(getattr(request, "quantity", 0) or 0),
                 filled_quantity=float(getattr(order, "filled_quantity", 0) or 0),
                 status=status,
+                client_order_id=_echoed_client_order_id(request),
                 side=getattr(request, "direction", None),
                 limit_price=getattr(request, "limit_price", None),
                 updated_at=getattr(order, "updated_at", None)
@@ -190,4 +200,18 @@ def snapshot_from_adapter(adapter, *, now: datetime,
         retrieved_at=now,
         connection_id=connection_id,
         provider_id=provider_id,
+        provider_instance_id=instance_id,
     )
+
+
+def _echoed_client_order_id(request) -> str | None:
+    """The platform id the provider echoed back, when it echoes one at all.
+
+    A provider that does not echo it is not a provider that failed: the id
+    stays ``None`` and reconciliation falls back to the provider's own
+    identifier instead of guessing.
+    """
+    value = getattr(request, "client_order_id", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None

@@ -46,8 +46,12 @@ class LocalPaperAdapter(MockTradingPlatformAdapter):
     def place_order(self, request: OrderRequest) -> Order:
         price = request.limit_price if request.limit_price is not None else request.stop_price
         if price is None:
-            self._next_id += 1
-            return Order(f"{self.order_prefix}-REJECTED-{self._next_id:06d}", request,
+            return Order(self._mint_rejected_id(), request,
                          OrderStatus.REJECTED, 0, None, self.clock(),
                          (), rejection_reason=NO_PRICE_REASON)
         return super().place_order(request)
+
+    def _mint_rejected_id(self) -> str:
+        """A rejected order still gets its own provider identity."""
+        return (f"{self.order_prefix}-REJECTED-{self.provider_instance_id}"
+                f"-{self._next_sequence():06d}")

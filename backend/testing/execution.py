@@ -18,6 +18,7 @@ from backend.connections.errors import (
     ExecutionTimeoutError,
 )
 from backend.execution.capabilities import PlatformCapabilities
+from backend.execution.identity import ProviderInstanceMixin
 from backend.execution.models import (
     AccountSnapshot,
     AssetType,
@@ -42,8 +43,10 @@ def full_paper_capabilities() -> PlatformCapabilities:
         market_data=False, paper_trading=True, live_trading=False)
 
 
-class ScriptedAdapter:
+class ScriptedAdapter(ProviderInstanceMixin):
     """Protocol-complete double whose behaviour each test scripts explicitly."""
+
+    order_prefix = "SCRIPTED"
 
     def __init__(self, *, name: str = "scripted", capabilities: PlatformCapabilities | None = None,
                  account: AccountSnapshot | None = None, connect_error: Exception | None = None,
@@ -64,7 +67,7 @@ class ScriptedAdapter:
         self._cancel_status = cancel_status
         self._clock = clock
         self._orders: dict[str, Order] = {}
-        self._next_id = 1
+        self._init_provider_identity()
 
     # -- identity / capability -------------------------------------------------
     def identify(self) -> str:
@@ -114,8 +117,7 @@ class ScriptedAdapter:
         return tuple(order for order in orders if order.created_at >= since)
 
     def place_order(self, request: OrderRequest) -> Order:
-        order_id = f"SCRIPTED-{self._next_id:06d}"
-        self._next_id += 1
+        order_id = self._mint_order_id()
         status = (normalize_order_status(self._place_status)
                   if self._place_status is not None else OrderStatus.SUBMITTED)
         order = Order(order_id, request, status, 0, None, self._clock(),

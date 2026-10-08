@@ -39,6 +39,7 @@ class OrderStore:
     def create(self, intent: OrderIntent, now, *,
                connection_id: str | None = None,
                provider_id: str | None = None,
+               provider_instance_id: str | None = None,
                status: OrderStatus = OrderStatus.NEW) -> Order:
         """Register a brand-new order. Raises if the id is already taken."""
         order = Order(
@@ -47,6 +48,7 @@ class OrderStore:
             created_at=now,
             connection_id=connection_id if connection_id is not None else intent.connection_id,
             provider_id=provider_id if provider_id is not None else intent.provider_id,
+            provider_instance_id=provider_instance_id,
             updated_at=now,
         )
         with self._lock:
@@ -95,6 +97,22 @@ class OrderStore:
                 if order.provider_order_id == provider_order_id:
                     return order
         return None
+
+    def find_all_by_provider_order_id(self, provider_order_id: str | None) -> tuple[Order, ...]:
+        """Every local order carrying this provider number.
+
+        A provider number is only unique for the instance that issued it, so
+        more than one order can legitimately answer to it. Callers that must
+        not guess - cancellation routing, the identity guard - see all of
+        them instead of whichever the dictionary yielded first.
+        """
+        if not provider_order_id:
+            return ()
+        with self._lock:
+            matches = [order for order in self._orders.values()
+                       if order.provider_order_id == provider_order_id]
+        return tuple(sorted(matches,
+                            key=lambda order: (order.created_at, order.client_order_id)))
 
     def find_by_client_order_id(self, client_order_id: str | None) -> Order | None:
         return self.get(client_order_id)

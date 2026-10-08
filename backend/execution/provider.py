@@ -5,15 +5,20 @@ from backend.market_data.models import Quote
 from backend.portfolio.models import Position
 
 from .capabilities import PlatformCapabilities
+from .identity import ProviderInstanceMixin
 from .interface import ExecutionProvider, TradingPlatformAdapter
 from .models import AccountSnapshot, AssetType, Balance, Fill, Order, OrderRequest, OrderStatus, OrderType
 
 
-class MockTradingPlatformAdapter:
+class MockTradingPlatformAdapter(ProviderInstanceMixin):
     """Deterministic test fixture with no network, credentials, or venue access.
 
     Automated tests only. The product wires :class:`LocalPaperAdapter` instead;
     nothing under ``ApplicationRuntime`` ever constructs this class.
+
+    Order ids are ``MOCK-<instance>-<sequence>``: the instance id names this
+    adapter instance and the sequence numbers its orders, so two adapters -
+    or two runs of one adapter - never hand out the same identity.
     """
 
     identify_name = "mock"
@@ -33,7 +38,7 @@ class MockTradingPlatformAdapter:
             extended_hours=True, order_replacement=True, market_data=True, paper_trading=True)
         self._orders: dict[str, Order] = {}
         self._positions = {position.symbol: position for position in positions}
-        self._next_id = 1
+        self._init_provider_identity()
         self._connected = True
 
     def identify(self) -> str:
@@ -56,8 +61,7 @@ class MockTradingPlatformAdapter:
                                (Balance("USD", self.cash, self.cash, self.cash),))
 
     def place_order(self, request: OrderRequest) -> Order:
-        order_id = f"{self.order_prefix}-{self._next_id:06d}"
-        self._next_id += 1
+        order_id = self._mint_order_id()
         filled = 0 if self.fail_orders else min(request.quantity, self.partial_fill_quantity or request.quantity)
         status = OrderStatus.REJECTED if self.fail_orders else (
             OrderStatus.FILLED if filled == request.quantity else OrderStatus.PARTIALLY_FILLED

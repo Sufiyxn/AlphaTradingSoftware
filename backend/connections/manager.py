@@ -15,6 +15,7 @@ import re
 import threading
 
 from backend.execution.gate import ExecutionSafetyGate
+from backend.execution.identity import ConnectionInstanceRegistry, ProviderInstanceIdentity
 from backend.execution.models import ExecutionMode
 
 from .credentials import CredentialHandle
@@ -59,7 +60,8 @@ class ConnectionManager:
     def __init__(self, *, clock, registry: ExecutionProviderRegistry | None = None,
                  stale_after_seconds: float = 300.0,
                  gate: ExecutionSafetyGate | None = None,
-                 factory_kwargs: dict | None = None) -> None:
+                 factory_kwargs: dict | None = None,
+                 journal=None) -> None:
         if stale_after_seconds <= 0:
             raise ValueError("stale_after_seconds must be positive")
         self.registry = registry or default_execution_providers()
@@ -70,6 +72,11 @@ class ConnectionManager:
         self._records: dict[str, ConnectionRecord] = {}
         self._adapters: dict[str, object] = {}
         self._lock = threading.RLock()
+        #: Provider-instance identity per connection. With a journal the
+        #: instance id and its order sequence survive a restart; without one
+        #: each process still mints a fresh instance so two runs can never
+        #: hand out the same provider order identity.
+        self.instances = ConnectionInstanceRegistry(journal)
 
     # ------------------------------------------------------------------ setup
     def add(self, *, connection_id: str, provider_id: str, label: str | None = None,
@@ -128,9 +135,39 @@ class ConnectionManager:
             # would talk to an external provider waits for an explicit test.
             verify = adapter is not None or (
                 descriptor is not None and descriptor.authentication == "NONE")
+        self._bind_instance(connection_id, adapter)
         if verify:
             self.verify(connection_id)
         return record
+
+    def _bind_instance(self, connection_id: str,
+                       adapter: object | None = None) -> ProviderInstanceIdentity:
+        """Bind this connection's provider instance onto its record and adapter.
+
+        A provider order number means nothing on its own: it is only unique
+        for the instance that minted it. The instance id is therefore decided
+        here - durably when a journal exists - and handed to the adapter so
+        every identity it mints, and every identity the pipeline records for
+        this connection, carries it.
+        """
+        identity = self.instances.bind(connection_id)
+        record = self._records.get(connection_id)
+        if record is not None:
+            record.provider_instance_id = identity.instance_id
+        if adapter is None:
+            with self._lock:
+                adapter = self._adapters.get(connection_id)
+        if adapter is None:
+            return identity
+        binder = getattr(adapter, "bind_provider_identity", None)
+        if callable(binder):
+            binder(identity)
+        else:
+            try:
+                adapter.provider_instance_id = identity.instance_id
+            except (AttributeError, TypeError):
+                pass  # an adapter that cannot carry one still orders normally
+        return identity
 
     def get(self, connection_id: str) -> ConnectionRecord:
         try:
@@ -161,6 +198,9 @@ class ConnectionManager:
         record = self.get(connection_id)
         with self._lock:
             self._adapters[connection_id] = adapter
+        # The new instance mints its own identities from this connection's
+        # durable instance id, so replacing an adapter never re-uses numbers.
+        self._bind_instance(connection_id, adapter)
         record.invalidate(
             "the execution adapter was replaced and has not been verified yet",
             at=self._clock())
@@ -227,6 +267,9 @@ class ConnectionManager:
                             authentication=AuthenticationState.FAILED)
             with self._lock:
                 self._adapters[connection_id] = adapter
+        # Re-bind every time the adapter is (re)established: whichever
+        # process verifies owns the instance this connection mints under.
+        self._bind_instance(connection_id, adapter)
 
         # --- authentication -------------------------------------------------
         if descriptor.authentication == "NONE":

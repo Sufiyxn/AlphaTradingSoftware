@@ -132,7 +132,7 @@ class ConnectionRecord:
         "account_state", "account_reason", "permission", "permission_reason",
         "capabilities", "declared_capabilities", "capability_limitations",
         "health", "last_verified_at", "last_success_at", "last_error_at",
-        "last_error", "last_readiness",
+        "last_error", "last_readiness", "provider_instance_id",
     )
 
     def __init__(self, *, connection_id: str, provider_id: str, provider_label: str,
@@ -175,6 +175,11 @@ class ConnectionRecord:
         self.last_error_at: datetime | None = None
         self.last_error: str | None = None
         self.last_readiness: ReadinessResult | None = None
+        # Which provider instance this connection is running as. The
+        # ConnectionManager binds it; provider order ids only mean anything
+        # together with it, so it is part of every identity this connection
+        # records.
+        self.provider_instance_id: str | None = None
 
     def begin(self, attempted_at: datetime) -> None:
         with self._lock:
@@ -271,6 +276,7 @@ class ConnectionRecord:
         return {
             "connection_id": self.connection_id,
             "provider_id": self.provider_id,
+            "provider_instance_id": self.provider_instance_id,
             "provider_label": self.provider_label,
             "label": self.label,
             "mode": self.mode.value,

@@ -49,6 +49,7 @@ class DiscrepancyKind(str, Enum):
     FILL_MISSING_LOCALLY = "FILL_MISSING_LOCALLY"
     DUPLICATE_FILL = "DUPLICATE_FILL"
     DUPLICATE_PROVIDER_ORDER = "DUPLICATE_PROVIDER_ORDER"
+    PROVIDER_ORDER_ID_COLLISION = "PROVIDER_ORDER_ID_COLLISION"
     TERMINAL_LOCAL_OPEN_REMOTELY = "TERMINAL_LOCAL_OPEN_REMOTELY"
     POSITION_QUANTITY_MISMATCH = "POSITION_QUANTITY_MISMATCH"
     POSITION_SIDE_MISMATCH = "POSITION_SIDE_MISMATCH"
@@ -155,7 +156,13 @@ class OrderReconciler:
     def reconcile(self, snapshot: ProviderStateSnapshot, *, now: datetime | None = None,
                   positions: tuple[Position, ...] = ()) -> ReconciliationReport:
         checked_at = now or datetime.now(timezone.utc)
-        local_orders = list(self._store.list())
+        # Only orders this snapshot could possibly be about are compared. One
+        # provably on another connection, or minted by another provider
+        # instance, is not expected in this view: pairing it would either
+        # invent a missing-order finding or - far worse - match it to a
+        # remote order that merely looks like it.
+        local_orders = [order for order in self._store.list()
+                        if _belongs_to(order, snapshot)]
         base: dict = {
             "checked_at": checked_at,
             "connection_id": snapshot.connection_id,
@@ -179,6 +186,7 @@ class OrderReconciler:
 
         findings: list[ReconcileDiscrepancy] = []
         findings.extend(_duplicate_remote_orders(snapshot.orders))
+        findings.extend(_duplicate_local_identities(local_orders))
         matched = self._compare_orders(local_orders, snapshot, findings)
         findings.extend(_compare_fills(local_orders, snapshot))
         findings.extend(_compare_positions(positions, snapshot))
@@ -193,18 +201,18 @@ class OrderReconciler:
     def _compare_orders(self, local_orders: list[Order], snapshot: ProviderStateSnapshot,
                         findings: list[ReconcileDiscrepancy]) -> int:
         remote_orders = list(snapshot.orders)
-        by_client: dict[str, int] = {}
-        by_provider: dict[str, int] = {}
+        by_client: dict[str, list[int]] = {}
+        by_provider: dict[str, list[int]] = {}
         for index, remote in enumerate(remote_orders):
-            if remote.client_order_id and remote.client_order_id not in by_client:
-                by_client[remote.client_order_id] = index
-            if remote.provider_order_id and remote.provider_order_id not in by_provider:
-                by_provider[remote.provider_order_id] = index
+            if remote.client_order_id:
+                by_client.setdefault(remote.client_order_id, []).append(index)
+            if remote.provider_order_id:
+                by_provider.setdefault(remote.provider_order_id, []).append(index)
 
         consumed: set[int] = set()
         matched = 0
         for order in local_orders:
-            index = _match_local(order, by_client, by_provider)
+            index = _match_local(order, by_client, by_provider, consumed)
             if index is None:
                 # Only an order we actually handed to the provider and that
                 # still needs to exist there can be missing: a locally
@@ -254,15 +262,76 @@ def _duplicate_remote_orders(remote_orders: list[RemoteOrder]) -> list[Reconcile
     return findings
 
 
-def _match_local(order: Order, by_client: dict[str, int],
-                 by_provider: dict[str, int]) -> int | None:
-    index = by_client.get(order.client_order_id)
-    if index is not None:
-        return index
+def _belongs_to(order: Order, snapshot: ProviderStateSnapshot) -> bool:
+    """Whether this local order could be one this snapshot's provider owns.
+
+    Unknown scope stays in the comparison: an order that cannot be placed on
+    another connection or instance might well be this one's, and leaving it
+    out would hide it. Only a provable difference excludes it.
+    """
+    if (snapshot.connection_id and order.connection_id
+            and snapshot.connection_id != order.connection_id):
+        return False
+    if (snapshot.provider_instance_id and order.provider_instance_id
+            and snapshot.provider_instance_id != order.provider_instance_id):
+        return False
+    return True
+
+
+def _duplicate_local_identities(local_orders: list[Order]) -> list[ReconcileDiscrepancy]:
+    """Local orders that hold one provider identity within one scope.
+
+    Two orders may share a provider number when they are provably on
+    different connections or issued by different provider instances. Inside
+    one scope, sharing is a collision: the number no longer identifies a
+    single order, so it is reported rather than quietly resolved by
+    whichever order the store happened to yield first.
+    """
+    findings: list[ReconcileDiscrepancy] = []
+    seen: dict[tuple, list[Order]] = {}
+    for order in local_orders:
+        if not order.provider_order_id:
+            continue
+        key = (order.connection_id, order.provider_instance_id,
+               order.provider_order_id)
+        seen.setdefault(key, []).append(order)
+    for key, orders in sorted(seen.items(),
+                              key=lambda item: tuple(str(part) for part in item[0])):
+        if len(orders) < 2:
+            continue
+        connection_id, instance_id, provider_order_id = key
+        findings.append(ReconcileDiscrepancy(
+            kind=DiscrepancyKind.PROVIDER_ORDER_ID_COLLISION,
+            message=(f"{len(orders)} local orders hold provider order identity "
+                     f"{provider_order_id!r} for connection {connection_id!r} "
+                     f"instance {instance_id!r}"),
+            order_id=orders[0].client_order_id,
+            symbol=orders[0].symbol,
+            local_value=provider_order_id,
+            remote_value=str(len(orders))))
+    return findings
+
+
+def _match_local(order: Order, by_client: dict[str, list[int]],
+                 by_provider: dict[str, list[int]],
+                 consumed: set[int]) -> int | None:
+    """The one remote order this local order may be, or ``None``.
+
+    A match has to be unique and still unclaimed: two remotes answering with
+    the same client id or the same provider number are ambiguous, and an
+    ambiguous answer is refused rather than guessed at. The provider number
+    only breaks the tie within one provider instance - callers only pass
+    remotes from the snapshot the order belongs to.
+    """
+    candidates = [index for index in by_client.get(order.client_order_id, ())
+                  if index not in consumed]
+    if len(candidates) == 1:
+        return candidates[0]
     if order.provider_order_id:
-        index = by_provider.get(order.provider_order_id)
-        if index is not None:
-            return index
+        candidates = [index for index in by_provider.get(order.provider_order_id, ())
+                      if index not in consumed]
+        if len(candidates) == 1:
+            return candidates[0]
     return None
 
 
@@ -324,8 +393,17 @@ def _compare_fills(local_orders: list[Order],
             if fill.provider_fill_id:
                 recorded.add(fill.provider_fill_id)
 
+    # A provider number that more than one local order holds identifies no
+    # order at all, so it is deliberately left out: attributing the fill
+    # would pick a winner, and the collision itself is reported separately.
+    occurrences: dict[str, int] = {}
+    for order in local_orders:
+        if order.provider_order_id:
+            occurrences[order.provider_order_id] = occurrences.get(order.provider_order_id, 0) + 1
     local_by_provider_id = {order.provider_order_id: order
-                            for order in local_orders if order.provider_order_id}
+                            for order in local_orders
+                            if order.provider_order_id
+                            and occurrences[order.provider_order_id] == 1}
     local_ids = {order.client_order_id for order in local_orders}
 
     seen: dict[str, int] = {}

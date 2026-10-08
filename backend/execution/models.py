@@ -152,12 +152,20 @@ class OrderRequest:
     stop_price: float | None = None
     time_in_force: str = "DAY"
     execution_mode: ExecutionMode = ExecutionMode.PAPER
+    #: The platform's own id for this order, sent to providers that echo it
+    #: back so a remote record can be tied to the order we own. Optional:
+    #: a provider that ignores it is not a provider that failed.
+    client_order_id: str | None = None
 
     def __post_init__(self) -> None:
         time_in_force = str(self.time_in_force or "").strip().upper()
         if not time_in_force:
             raise ValueError("time_in_force must not be empty")
         object.__setattr__(self, "time_in_force", time_in_force)
+        client_order_id = self.client_order_id
+        if client_order_id is not None:
+            client_order_id = str(client_order_id).strip()
+            object.__setattr__(self, "client_order_id", client_order_id or None)
         if not isinstance(self.execution_mode, ExecutionMode):
             try:
                 object.__setattr__(self, "execution_mode",

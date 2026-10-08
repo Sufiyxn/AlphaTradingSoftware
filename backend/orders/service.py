@@ -21,7 +21,8 @@ Journal event vocabulary (see :data:`ORDER_EVENTS`):
 ``ORDER_SUBMISSION_FAILED``
     the provider could not be reached; no order state was invented.
 ``RECONCILIATION_DISCREPANCY``
-    the provider and the journal disagree, or the provider could not be read.
+    the provider and the journal disagree, the provider could not be read, or
+    a provider order identity collided with one the journal already owns.
 """
 from __future__ import annotations
 
@@ -35,13 +36,43 @@ from .cancellation import CancellationResult, OrderCanceller
 from .lifecycle import add_fill, status_for_fill, with_fills, with_status
 from .models import Fill, Order, OrderIntent, can_transition, is_terminal
 from .provider import ProviderStateSnapshot
-from .reconcile import OrderReconciler, ReconciliationReport, ReconcileStatus
+from .reconcile import (
+    DiscrepancyKind,
+    OrderReconciler,
+    ReconciliationReport,
+    ReconcileStatus,
+)
 from .store import OrderStore
 
 __all__ = [
     "ORDER_EVENTS",
     "OrderLifecycleService",
+    "ProviderIdentityCollision",
 ]
+
+
+class ProviderIdentityCollision(Exception):
+    """A provider handed back an order identity another local order owns.
+
+    Raised fail-closed: the platform refuses to register the number rather
+    than adopt an identity it cannot prove unique, and journals why. The
+    order that already owns the identity keeps it; the order being submitted
+    is never allowed to take it over.
+    """
+
+    def __init__(self, *, provider_order_id: str,
+                 provider_instance_id: str | None, connection_id: str | None,
+                 order_id: str, conflicting_order_id: str) -> None:
+        self.provider_order_id = provider_order_id
+        self.provider_instance_id = provider_instance_id
+        self.connection_id = connection_id
+        self.order_id = order_id
+        self.conflicting_order_id = conflicting_order_id
+        super().__init__(
+            f"provider order identity {provider_order_id!r} (connection "
+            f"{connection_id!r}, instance {provider_instance_id!r}) is already "
+            f"owned by order {conflicting_order_id!r}; order {order_id!r} was "
+            f"not registered with it")
 
 ORDER_EVENTS: tuple[str, ...] = (
     "ORDER_CREATED",
@@ -81,34 +112,85 @@ class OrderLifecycleService:
     # -- lifecycle --------------------------------------------------------
     def create(self, intent: OrderIntent, *, now: datetime | None = None,
                connection_id: str | None = None,
-               provider_id: str | None = None) -> Order:
+               provider_id: str | None = None,
+               provider_instance_id: str | None = None) -> Order:
         """Register a new order as ``NEW`` and journal the decision."""
         moment = now or self._clock()
         order = self.store.create(intent, moment, connection_id=connection_id,
-                                  provider_id=provider_id)
+                                  provider_id=provider_id,
+                                  provider_instance_id=provider_instance_id)
         self._persist(order, moment, "ORDER_CREATED",
                       "order created locally and awaiting submission",
                       {"status": order.status.value})
         return order
 
     def mark_submitted(self, order_id: str, provider_order_id: str | None,
-                       now: datetime | None = None) -> Order:
+                       now: datetime | None = None, *,
+                       provider_instance_id: str | None = None) -> Order:
         """Record that the request reached the provider.
 
         ``provider_order_id`` is stored verbatim when the provider gave one
         and is left ``None`` when it did not - the platform never invents a
-        provider identity to fill the gap.
+        provider identity to fill the gap. Registering one also registers
+        which provider instance issued it, and refuses the registration
+        outright when another local order already owns that identity.
         """
         moment = now or self._clock()
         order = self.store.require(order_id)
+        instance = (provider_instance_id if provider_instance_id is not None
+                    else order.provider_instance_id)
+        conflict = self._identity_conflict(order, provider_order_id, instance)
+        if conflict is not None:
+            collision = ProviderIdentityCollision(
+                provider_order_id=provider_order_id,
+                provider_instance_id=instance,
+                connection_id=order.connection_id,
+                order_id=order.client_order_id,
+                conflicting_order_id=conflict.client_order_id)
+            self._event(moment, "RECONCILIATION_DISCREPANCY", str(collision),
+                        symbol=order.symbol,
+                        context={"kind": DiscrepancyKind.PROVIDER_ORDER_ID_COLLISION.value,
+                                 "order_id": order.client_order_id,
+                                 "conflicting_order_id": conflict.client_order_id,
+                                 "connection_id": order.connection_id,
+                                 "provider_instance_id": instance,
+                                 "provider_order_id": provider_order_id,
+                                 "status": order.status.value})
+            raise collision
         updated = with_status(order, OrderStatus.SUBMITTED, moment,
-                              provider_order_id=provider_order_id)
+                              provider_order_id=provider_order_id,
+                              provider_instance_id=instance)
         self.store.save(updated)
         self._persist(updated, moment, "ORDER_SUBMITTED",
                       "order submitted to the provider",
                       {"provider_order_id": updated.provider_order_id,
+                       "provider_instance_id": updated.provider_instance_id,
                        "status": updated.status.value})
         return updated
+
+    def _identity_conflict(self, order: Order, provider_order_id: str | None,
+                           provider_instance_id: str | None) -> Order | None:
+        """The other local order that already owns this provider identity.
+
+        Scope decides. Orders on provably different connections, or issued by
+        provably different provider instances, are different identities and
+        may share a number. Anything the platform cannot tell apart is
+        treated as the same identity, so an unknown scope fails closed
+        rather than quietly letting two orders claim one number.
+        """
+        if not provider_order_id:
+            return None
+        for candidate in self.store.find_all_by_provider_order_id(provider_order_id):
+            if candidate.client_order_id == order.client_order_id:
+                continue  # re-stating our own identity is not a conflict
+            if (order.connection_id and candidate.connection_id
+                    and order.connection_id != candidate.connection_id):
+                continue
+            if (provider_instance_id and candidate.provider_instance_id
+                    and provider_instance_id != candidate.provider_instance_id):
+                continue
+            return candidate
+        return None
 
     def apply_status(self, order_id: str, status: OrderStatus,
                      now: datetime | None = None, *,

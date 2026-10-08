@@ -49,7 +49,13 @@ from backend.execution.models import (
     OrderType,
     normalize_order_status,
 )
-from backend.orders import Order, OrderIntent, OrderLifecycleService, OrderStore
+from backend.orders import (
+    Order,
+    OrderIntent,
+    OrderLifecycleService,
+    OrderStore,
+    ProviderIdentityCollision,
+)
 from backend.portfolio import Portfolio
 from backend.portfolio.models import PortfolioSnapshot
 from backend.risk import RiskEngine
@@ -95,6 +101,11 @@ class _ConnectionExecutor:
     holds, not just the pipeline's default. An order whose connection has no
     verified adapter yet raises, which the canceller reports honestly as a
     ``PROVIDER_ERROR`` instead of a silent local close.
+
+    A provider number is only unique for the instance that issued it, so the
+    store is asked for *every* order carrying it. More than one connection
+    answering means the number no longer identifies a single order, and that
+    raises rather than cancelling whichever one the store yielded first.
     """
 
     def __init__(self, store: OrderStore, connections: ConnectionManager,
@@ -104,7 +115,14 @@ class _ConnectionExecutor:
         self._default_connection_id = default_connection_id
 
     def cancel_order(self, provider_order_id: str):
-        order = self._store.find_by_provider_order_id(provider_order_id)
+        matches = self._store.find_all_by_provider_order_id(provider_order_id)
+        connection_ids = {order.connection_id for order in matches}
+        if len(connection_ids) > 1:
+            raise RuntimeError(
+                f"provider order identity {provider_order_id!r} is claimed by "
+                f"more than one connection; refusing to cancel an order that "
+                f"cannot be identified")
+        order = matches[0] if matches else None
         connection_id = ((order.connection_id if order is not None else None)
                          or self._default_connection_id)
         adapter = self._connections.adapter_for(connection_id)
@@ -353,7 +371,8 @@ class TradingPipeline:
         #    actually answered: a failed submission must never leave behind an
         #    order the platform cannot prove exists.
         intent = self._order_intent(request, decision, record, connection_id)
-        submitted = self._submit(request, decision, adapter, record)
+        submitted = self._submit(request, decision, adapter, record,
+                                 intent.client_order_id)
         if isinstance(submitted, PipelineResult):
             self.orders.note_submission_failure(
                 intent, submitted.reason or submitted.code, now=self._clock(),
@@ -361,7 +380,10 @@ class TradingPipeline:
             return replace(submitted, risk=decision,
                            connection_id=record.connection_id,
                            provider_id=record.provider_id)
-        order = self._register_order(intent, submitted, record)
+        order = self._register_order(intent, submitted, record, adapter,
+                                     request=request, decision=decision)
+        if isinstance(order, PipelineResult):
+            return order
         self._record_order(order)
 
         # 9. normalize the provider's status against the canonical order ------
@@ -431,17 +453,38 @@ class TradingPipeline:
             risk_code=risk_code,
         )
 
-    def _register_order(self, intent: OrderIntent, provider_order, record: ConnectionRecord) -> Order:
-        """Record the canonical order the provider just acknowledged."""
+    def _register_order(self, intent: OrderIntent, provider_order, record: ConnectionRecord,
+                        adapter, *, request: _Request,
+                        decision: RiskDecision) -> object:
+        """Record the canonical order the provider just acknowledged.
+
+        The identity the provider answered with is adopted only if no other
+        local order already owns it. A collision is its own fail-closed
+        outcome: the order that owns the identity keeps it, the order that
+        was just submitted is closed as FAILED with a reason a human can act
+        on, and neither identity is rewritten to make the numbers fit.
+        """
         now = self._clock()
+        provider_instance_id = (getattr(adapter, "provider_instance_id", None)
+                                or record.provider_instance_id)
         try:
             order = self.orders.create(intent, now=now,
                                        connection_id=record.connection_id,
-                                       provider_id=record.provider_id)
+                                       provider_id=record.provider_id,
+                                       provider_instance_id=provider_instance_id)
             order = self.orders.mark_submitted(
-                order.client_order_id, getattr(provider_order, "order_id", None), now=now)
+                order.client_order_id, getattr(provider_order, "order_id", None),
+                now=now, provider_instance_id=provider_instance_id)
             order = self.orders.apply_provider_order(
                 order.client_order_id, provider_order, now=now)
+        except ProviderIdentityCollision as collision:
+            logger.error("Refusing a colliding provider order identity: %s", collision)
+            return self._outcome(
+                request, code=PipelineCode.PROVIDER_ID_COLLISION,
+                reason=str(collision), risk=decision, connection=record,
+                order=self._close_collided_order(collision.order_id,
+                                                 str(collision), now),
+                submitted=True)
         except Exception:  # noqa: BLE001 - a store bug must not hide the provider's answer
             logger.exception("Unable to record the canonical order lifecycle")
             return provider_order
@@ -449,6 +492,16 @@ class TradingPipeline:
         if reported > float(order.filled_quantity) + 1e-9:
             self.orders.note_fill_gap(order.client_order_id, reported, now=now)
         return order
+
+    def _close_collided_order(self, order_id: str, reason: str, now: datetime) -> Order | None:
+        """Close an order that could not be registered, without losing it."""
+        try:
+            return self.orders.apply_status(
+                order_id, OrderStatus.FAILED, now, rejection_reason=reason)
+        except Exception:  # noqa: BLE001 - the collision itself must stay visible
+            logger.exception("Unable to close the collided order %s", order_id)
+            return self.orders.get(order_id)
+
     def _validation_failure(self, request: _Request) -> tuple[str, str] | None:
         setup = request.setup
         if not isinstance(setup, TradeSetup):
@@ -550,8 +603,13 @@ class TradingPipeline:
         return None
 
     def _submit(self, request: _Request, decision: RiskDecision, adapter,
-                record: ConnectionRecord) -> object:
-        """Hand the order to the adapter; a provider failure maps to a result."""
+                record: ConnectionRecord, client_order_id: str) -> object:
+        """Hand the order to the adapter; a provider failure maps to a result.
+
+        The platform's own ``client_order_id`` travels with the request: a
+        provider that echoes it lets reconciliation tie its record to the
+        order we own without guessing, and one that ignores it loses nothing.
+        """
         setup = request.setup
         order_request = OrderRequest(
             symbol=str(setup.symbol).strip().upper(),
@@ -560,6 +618,7 @@ class TradingPipeline:
             limit_price=request.limit_price,
             order_type=OrderType.LIMIT,
             execution_mode=request.mode,
+            client_order_id=client_order_id,
         )
         try:
             return adapter.place_order(order_request)

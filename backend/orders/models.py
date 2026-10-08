@@ -182,6 +182,7 @@ class OrderIntent:
             stop_price=self.stop_price,
             time_in_force=self.time_in_force,
             execution_mode=self.execution_mode,
+            client_order_id=self.client_order_id,
         )
 
 
@@ -192,7 +193,9 @@ class Order:
     ``client_order_id`` is internal and permanent. ``provider_order_id`` is
     whatever the provider answered with and stays ``None`` until submission
     succeeds - it is never invented, never reused as the internal identity,
-    and never derived from the symbol or a timestamp.
+    and never derived from the symbol or a timestamp. It is only unique for
+    the connection instance that issued it, so ``provider_instance_id`` and
+    ``connection_id`` travel with it and complete the provider identity.
 
     ``filled_quantity``/``average_fill_price``/``remaining_quantity`` are all
     derived from the recorded fills, so an order can never claim to be filled
@@ -211,6 +214,11 @@ class Order:
     rejection_reason: str | None = None
     connection_id: str | None = None
     provider_id: str | None = None
+    #: Which instance of the provider minted ``provider_order_id``. The full
+    #: provider identity is connection + instance + number: a number is only
+    #: unique for the instance that issued it, so the instance travels with
+    #: the order and is restored with it after a restart.
+    provider_instance_id: str | None = None
 
     # -- identity ---------------------------------------------------------
     @property
@@ -272,6 +280,7 @@ class Order:
             "execution_mode": self.intent.execution_mode.value,
             "connection_id": self.connection_id,
             "provider_id": self.provider_id,
+            "provider_instance_id": self.provider_instance_id,
             "source": self.intent.source,
             "signal_id": self.intent.signal_id,
             "status": self.status.value,
@@ -355,6 +364,7 @@ def order_from_dict(payload: dict) -> Order:
         rejection_reason=payload.get("rejection_reason"),
         connection_id=payload.get("connection_id"),
         provider_id=payload.get("provider_id"),
+        provider_instance_id=payload.get("provider_instance_id"),
     )
 
 

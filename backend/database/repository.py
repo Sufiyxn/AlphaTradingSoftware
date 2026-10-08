@@ -108,6 +108,52 @@ class SQLiteJournalRepository:
                               context: Any = None) -> None:
         self._insert("position_events", (timestamp.isoformat(), symbol.strip().upper(), event_type, to_json(context or {})))
 
+    # -- provider-instance identity ---------------------------------------
+    def connection_instance(self, connection_id: str) -> dict[str, Any] | None:
+        """The durable provider instance bound to a connection, if there is one."""
+        rows = self._query(
+            "SELECT connection_id,instance_id,created_at,next_sequence "
+            "FROM connection_instances WHERE connection_id=?", (connection_id,))
+        return dict(rows[0]) if rows else None
+
+    def bind_connection_instance(self, connection_id: str, *, instance_id: str,
+                                 created_at: datetime) -> dict[str, Any]:
+        """Create a connection's instance identity exactly once.
+
+        Whoever binds first owns the id: a second process binding the same
+        connection recovers the row that one created instead of minting a
+        competing identity for it.
+        """
+        self._execute(
+            """INSERT INTO connection_instances(connection_id,instance_id,created_at,next_sequence)
+               VALUES(?,?,?,0) ON CONFLICT(connection_id) DO NOTHING""",
+            (str(connection_id or "").strip(), instance_id, created_at.isoformat()))
+        row = self.connection_instance(connection_id)
+        if row is None:
+            raise KeyError(
+                f"the provider instance identity for {connection_id!r} could not be stored")
+        return row
+
+    def next_provider_sequence(self, connection_id: str) -> int:
+        """Allocate the next durable provider-order sequence for a connection.
+
+        Monotonic and restart-safe: the counter lives in the journal, so a
+        process that starts again continues numbering instead of repeating
+        the identities it already handed out.
+        """
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "UPDATE connection_instances SET next_sequence = next_sequence + 1 "
+                "WHERE connection_id=?",
+                (str(connection_id or "").strip(),))
+            if cursor.rowcount == 0:
+                raise KeyError(
+                    f"no provider instance is bound for connection {connection_id!r}")
+            row = self._connection.execute(
+                "SELECT next_sequence FROM connection_instances WHERE connection_id=?",
+                (str(connection_id or "").strip(),)).fetchone()
+            return int(row[0])
+
     def closed_trades(self, *, start: date | None = None, end: date | None = None,
                       symbol: str | None = None) -> tuple[dict[str, Any], ...]:
         where = ["exit_timestamp IS NOT NULL"]
@@ -244,6 +290,7 @@ class SQLiteJournalRepository:
         CREATE TABLE IF NOT EXISTS system_events(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,event_type TEXT NOT NULL,symbol TEXT,message TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY,timestamp TEXT NOT NULL,symbol TEXT,message TEXT NOT NULL,context_json TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS daily_performance(report_date TEXT PRIMARY KEY,context_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS connection_instances(connection_id TEXT PRIMARY KEY,instance_id TEXT NOT NULL,created_at TEXT NOT NULL,next_sequence INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS ix_trades_exit ON trades(exit_timestamp);
         CREATE INDEX IF NOT EXISTS ix_fills_order ON order_fills(order_id);
         CREATE INDEX IF NOT EXISTS ix_events_timestamp ON system_events(timestamp);
