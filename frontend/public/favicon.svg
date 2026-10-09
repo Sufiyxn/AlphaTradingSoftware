@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Alpha Trading Platform">
+  <rect width="32" height="32" rx="7" fill="#0a1018"/>
+  <rect x="1.5" y="1.5" width="29" height="29" rx="5.5" fill="none" stroke="#41d7a1" stroke-width="1.5"/>
+  <path d="M16 6.5 L24.5 25.5 H20.8 L19.3 21.9 H12.7 L11.2 25.5 H7.5 Z M14.1 18.7 H17.9 L16 13.7 Z" fill="#41d7a1"/>
+</svg>
