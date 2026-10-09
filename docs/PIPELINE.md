@@ -111,6 +111,8 @@ safe_quantity  = min(
 approved        = min(safe_quantity, requested_quantity)    # requested only ever reduces
 ```
 
+Units: `risk_budget` is **dollars**; everything after a `//` is a **share count**. On a $100 stock with a $95 stop (distance $5.00) in a $100,000 account, `risk_budget` is `min(100000 × 1%, 100000 × 1%)` = **$1,000.00**, and the trade-risk term is `1000 // 5` = **200 shares** — never 1,000. The `sizing_terms()` mapping therefore names that key `risk_quantity`; every value it returns is a whole-share count, while `RiskDecision.risk_amount` (`risk_per_unit × quantity`) is the dollar figure.
+
 Every floor/ceiling is validated at load time: a value that loosens a floor (or widens a
 ceiling) raises `ValueError` at startup, so configuration can only tighten risk.
 

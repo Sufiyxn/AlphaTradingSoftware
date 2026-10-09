@@ -21,6 +21,11 @@ fabricated price or account value)::
     safe_quantity     = min(risk_quantity, exposure_quantity, cash_quantity,
                             notional_quantity, symbol_quantity, max_quantity)
 
+Units: ``risk_budget`` is DOLLARS (here ``100_000 * 1% = 1_000``); every
+term after the ``//`` - including ``risk_quantity`` - is a SHARE COUNT. The
+$100 example: ``risk_budget`` 1_000.00 / ``distance`` 5.00 = 200 shares, and
+that is what the caller approves, never 1_000.00.
+
 The caller (RiskEngine) then takes ``approved = min(safe_quantity,
 requested_quantity)`` - a request is only ever reduced, never increased. This
 sizing arithmetic constrains exposure; it makes no claim about profitability.
@@ -48,13 +53,16 @@ def sizing_terms(entry: float, stop: float, portfolio: PortfolioSnapshot,
                  direction: Direction | None = None) -> dict[str, int]:
     """Each capacity constraint as a share quantity; sizing is their minimum.
 
-    The mapping keeps insertion order (risk, exposure, cash, notional,
-    symbol, max quantity) so callers can name every binding constraint
-    deterministically when the result is zero.
+    EVERY value is a whole-share count, not currency: the dollar-denominated
+    risk budget is divided by the per-share stop distance before it is
+    returned, so ``risk_quantity`` - not ``risk_budget`` - is the key that
+    carries it. The mapping keeps insertion order (risk, exposure, cash,
+    notional, symbol, max quantity) so callers can name every binding
+    constraint deterministically when the result is zero.
     """
     distance = abs(entry - stop)
     if distance <= 0 or entry <= 0:
-        return {"risk_budget": 0, "portfolio_exposure": 0, "cash": 0,
+        return {"risk_quantity": 0, "portfolio_exposure": 0, "cash": 0,
                 "position_notional": 0, "max_quantity": int(config.max_quantity)}
     pending = _pending(portfolio)
     reserved_notional = sum(item.notional for item in pending)
@@ -66,7 +74,7 @@ def sizing_terms(entry: float, stop: float, portfolio: PortfolioSnapshot,
                         - portfolio.exposure - reserved_notional)
     cash = max(0.0, portfolio.available_capital - reserved_notional)
     terms = {
-        "risk_budget": int(risk_budget // distance),
+        "risk_quantity": int(risk_budget // distance),
         "portfolio_exposure": int(exposure_room // entry),
         "cash": int(cash // entry),
         "position_notional": int(config.max_position_notional // entry),

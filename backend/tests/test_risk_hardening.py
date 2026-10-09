@@ -37,6 +37,7 @@ from backend.risk import (
     RiskEngine,
     RiskStatus,
 )
+from backend.risk.sizing import size_position, sizing_terms
 from backend.strategies.models import Direction, TradeSetup
 
 NOW = datetime(2024, 1, 8, 15, tzinfo=timezone.utc)
@@ -109,6 +110,54 @@ class PositionSizingTests(unittest.TestCase):
             trade_setup(), snapshot())
         self.assertTrue(decision.approved, decision.reasons)
         self.assertEqual(decision.quantity, 25)
+
+    def test_sizing_terms_are_share_counts_and_the_budget_stays_dollars(self):
+        # The dollar risk budget never leaves this function as a "budget":
+        # sizing_terms divides it by the stop distance first, so every value
+        # it returns is a whole-share count under a quantity-named key.
+        config = RiskConfig()
+        snap = snapshot()
+        terms = sizing_terms(100.0, 95.0, snap, config,
+                             symbol="ABC", direction=Direction.LONG)
+        self.assertEqual(set(terms), {"risk_quantity", "portfolio_exposure",
+                                      "cash", "position_notional",
+                                      "max_quantity", "symbol_exposure"})
+        budget_dollars = min(snap.available_capital * config.risk_fraction,
+                             snap.equity * config.max_risk_per_trade)
+        self.assertEqual(budget_dollars, 1_000.00)
+        self.assertEqual(terms["risk_quantity"],
+                         int(budget_dollars // 5.0))
+        self.assertEqual(terms["risk_quantity"], 200, "shares, not dollars")
+        self.assertEqual(size_position(100.0, 95.0, snap, config,
+                                       symbol="ABC", direction=Direction.LONG),
+                         200)
+
+    def test_one_hundred_dollar_stock_worked_example(self):
+        engine = RiskEngine()
+        config = RiskConfig()
+        budget = min(100_000.0 * config.risk_fraction,
+                     100_000.0 * config.max_risk_per_trade)
+        self.assertEqual(budget, 1_000.00)                  # DOLLARS
+        self.assertEqual(abs(100.0 - 95.0), 5.00)           # $/share stop
+        self.assertEqual(int(budget // 5.00), 200)          # SHARES
+
+        decision = engine.evaluate(trade_setup(), snapshot())
+        self.assertTrue(decision.approved, decision.reasons)
+        self.assertEqual(decision.quantity, 200)            # shares
+        self.assertEqual(decision.risk_amount, 1_000.00)    # dollars 5.00 x 200
+        self.assertEqual(decision.projected_exposure, 20_000.00)  # 200 x 100.00
+
+        self.assertEqual(engine.evaluate(
+            trade_setup(), snapshot(), requested_quantity=50).quantity, 50)
+        self.assertEqual(engine.evaluate(
+            trade_setup(), snapshot(), requested_quantity=500).quantity, 200)
+        self.assertEqual(engine.evaluate(
+            trade_setup(), snapshot(), requested_quantity=None).quantity, 200)
+
+        smaller = engine.evaluate(trade_setup(), snapshot(cash=20_000.0))
+        self.assertTrue(smaller.approved, smaller.reasons)
+        self.assertEqual(smaller.quantity, 40)              # 200.00 / 5.00
+        self.assertEqual(smaller.risk_amount, 200.00)
 
     def test_zero_safe_quantity_rejects(self):
         decision = RiskEngine().evaluate(trade_setup(), snapshot(cash=1.0))

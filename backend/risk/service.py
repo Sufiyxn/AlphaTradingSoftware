@@ -15,8 +15,9 @@ def _finite_positive(value) -> bool:
 
 
 #: Which rule and message names each sizing constraint when it binds to zero.
+#: Keys are the SHARE-COUNT keys of :func:`backend.risk.sizing.sizing_terms`.
 _BINDING_LIMIT_CODES = {
-    "risk_budget": RiskCode.TRADE_RISK_EXCEEDED,
+    "risk_quantity": RiskCode.TRADE_RISK_EXCEEDED,
     "portfolio_exposure": RiskCode.PORTFOLIO_EXPOSURE_EXCEEDED,
     "cash": RiskCode.ZERO_SAFE_QUANTITY,
     "position_notional": RiskCode.POSITION_NOTIONAL_EXCEEDED,
@@ -24,7 +25,7 @@ _BINDING_LIMIT_CODES = {
 }
 
 _BINDING_LIMIT_REASONS = {
-    "risk_budget": "position sizing found no room inside the risk budget",
+    "risk_quantity": "position sizing found no room inside the risk budget",
     "portfolio_exposure": "no capacity remains under the portfolio exposure limit",
     "cash": "no available cash capacity for this position",
     "position_notional": "the entry price exceeds the maximum position notional",
@@ -201,7 +202,7 @@ class RiskEngine:
                    "insufficient available capital or position capacity")
             # Name every constraint that has no room left, so the rejected
             # rule is explainable from the journal alone.
-            for term in ("risk_budget", "portfolio_exposure", "cash",
+            for term in ("risk_quantity", "portfolio_exposure", "cash",
                          "position_notional", "symbol_exposure"):
                 if terms.get(term, 1) <= 0:
                     reject(_BINDING_LIMIT_CODES[term], _BINDING_LIMIT_REASONS[term])
