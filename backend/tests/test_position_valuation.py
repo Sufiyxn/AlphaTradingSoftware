@@ -143,6 +143,31 @@ class PositionValuationTests(unittest.TestCase):
         self.assertFalse(position.auto_exit_enabled)
         self.assertIn("staleness window", position.price_reason)
 
+    def test_a_position_ages_to_stale_across_a_closed_session_without_inventing_a_price(self):
+        # Friday 15:55 ET a real quote marks the position FRESH. After the
+        # regular close, and all Saturday, no new quote arrives: the same real
+        # price must age to STALE - never stay FRESH, never be replaced by an
+        # invented value, and never trigger an automatic exit.
+        holder = {"at": datetime(2026, 10, 9, 19, 55, tzinfo=timezone.utc)}
+        clock = lambda: holder["at"]  # noqa: E731 - mutable fixture clock
+        quote_at = holder["at"]
+        portfolio, engine, valuation = harness(
+            QuoteProvider((Quote("AAA", quote_at, 100.0, 10),)),
+            stale_after=300.0, clock=clock)
+        open_paper(portfolio, engine, opened_at=quote_at)
+        valuation.refresh(["AAA"])
+        self.assertEqual(portfolio.positions[0].price_state, PriceState.FRESH)
+
+        holder["at"] = datetime(2026, 10, 10, 15, 0, tzinfo=timezone.utc)  # Saturday
+        report = valuation.refresh(["AAA"])
+        position = portfolio.positions[0]
+        self.assertEqual(position.price_state, PriceState.STALE)
+        self.assertEqual(position.market_price, 100.0)
+        self.assertEqual(position.price_as_of, quote_at)
+        self.assertFalse(position.auto_exit_enabled)
+        self.assertEqual(len(engine.trades), 1, "no automatic exit fired on a stale mark")
+        self.assertEqual(report.availability, STALE)
+
     def test_missing_quote_leaves_the_position_unpriced_with_a_reason(self):
         portfolio, engine, valuation = harness(QuoteProvider(()))
         open_paper(portfolio, engine)

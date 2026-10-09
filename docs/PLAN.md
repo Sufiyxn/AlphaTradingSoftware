@@ -77,6 +77,18 @@
 > are paper-ledger position actions, not venue orders. The already-running backend (8000), demo
 > backend (8001) and vite dev server (5173) predate these changes and need a controlled restart
 > before the new status fields can be verified in a browser. Detail: `docs/PIPELINE.md`.**
+> **Phase 11 checkpoint 2 (session-aware scanning and valuation staleness) is implemented and
+> verified — `588 passed, 203 subtests` (again with the exchange closed, so the suite stays
+> independent of the host clock). The orchestrator now evaluates `session_gate` at the top of
+> every cycle: outside the allowed session it fetches no market data, evaluates no candidate,
+> performs no AI advisory and attempts no submission; it journals `CYCLE_SESSION_SKIPPED` with
+> the calendar's reason (never as an error), still advances `last_scan_timestamp`, and reports
+> `session_blocked` / `session_reason` in its snapshot, which `/api/status` serves. Scan
+> awareness and submission enforcement share one policy and one fail-closed provider-capability
+> read, so the scanner can never act on a session the pipeline would refuse. Valuation staleness
+> across a closed session is proven by test: a position marked FRESH before the close ages to
+> STALE with its last *real* price and timestamp once no new quote arrives - never FRESH, never
+> an invented value, and never an automatic exit. Detail: `docs/PIPELINE.md`.**
 
 ---
 
@@ -296,7 +308,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 8 | Risk Hardening | **DONE** (committed: `c8420ab`) |
 | 9 | Order Lifecycle Management & Reconciliation | **DONE** (committed: `Complete phase 9 order lifecycle and reconciliation`) |
 | 10 | First-Class Position Management | pending |
-| 11 | Market-Session / Market-Hours Handling | **IN PROGRESS** (checkpoint 1 done) |
+| 11 | Market-Session / Market-Hours Handling | **DONE** (checkpoints 1-2) |
 | 12 | Autonomous Decision Engine | pending |
 | 13 | Strategy Evaluation & Anti-Overfitting Validation | pending |
 | 14 | Backtesting Product Quality | pending |
@@ -724,10 +736,17 @@ as done when its acceptance criteria and regression tests pass.
   legally next session; the webhook answers `422 SESSION_CLOSED` and never remembers the signal.
   `GET /api/status` reports `market_session_policy` and `market_session_orders_allowed`.
   Verified by `backend/tests/test_market_sessions.py` and the committed smoke suite.
-- **Checkpoint 2 — session-aware scanning and valuation staleness (pending).** The orchestrator
-  must not evaluate entry candidates outside the configured session, and a valuation older than
-  its staleness window must be reported as stale instead of priced; both must be observable in
-  `/api/status` and journaled without inventing quotes.
+- **Checkpoint 2 — session-aware scanning and valuation staleness (DONE).** The orchestrator
+  evaluates the same `session_gate` decision at the top of every cycle: outside the allowed
+  session it performs no scan, no strategy evaluation, no AI advisory and no submission attempt,
+  journals `CYCLE_SESSION_SKIPPED` with the calendar's reason (a closed market is never an
+  error), still advances the cycle clock, and exposes `session_blocked` / `session_reason` in
+  its snapshot for `/api/status`. Scan awareness and the pipeline's submission enforcement share
+  one `MARKET_SESSION_SUBMISSION` policy and one fail-closed provider-capability read. Valuation
+  staleness across a closed session is enforced and tested: with no new quotes a position ages
+  from FRESH to STALE carrying its last real price and timestamp - never FRESH, never an
+  invented value, and never an automatic exit. Verified by `OrchestratorSessionTests` and
+  `test_position_valuation.py` in the full suite.
 
 ### PHASE 12 — Autonomous Decision Engine
 - Continuously scan/analyze real market data, identify valid opportunities, run strategy

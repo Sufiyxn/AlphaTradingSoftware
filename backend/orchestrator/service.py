@@ -6,6 +6,12 @@ from datetime import datetime, timedelta, timezone
 from backend.ai import AIAnalysisService
 from backend.database import JournalRepository
 from backend.market_data import DataValidationError, MarketDataProviderError, MarketDataService
+from backend.market_data.session import (
+    DEFAULT_SESSION_POLICY,
+    AssetClass,
+    normalize_session_policy,
+    session_gate,
+)
 from backend.paper_trading import PaperTradingEngine
 from backend.pipeline import ExecutionIntent
 from backend.portfolio import Portfolio
@@ -28,7 +34,9 @@ class TradingOrchestrator:
                  paper_trading: PaperTradingEngine, portfolio: Portfolio,
                  config: OrchestratorConfig, clock=lambda: datetime.now(timezone.utc),
                  ai_analysis: AIAnalysisService | None = None,
-                 journal: JournalRepository | None = None):
+                 journal: JournalRepository | None = None,
+                 session_submission: str = DEFAULT_SESSION_POLICY,
+                 provider_extended_hours=None):
         self.market_data = market_data
         self.scanner = scanner
         self.strategy = strategy
@@ -38,6 +46,14 @@ class TradingOrchestrator:
         self.config = config
         self.ai_analysis = ai_analysis
         self.journal = journal
+        #: Phase 11 checkpoint 2: which market sessions the scanner may
+        #: evaluate candidates in. Enforcement of actual submissions stays
+        #: with the pipeline; this only avoids scanning when no entry could
+        #: be acted on. ``provider_extended_hours`` is a callable reporting
+        #: the connected execution provider's extended-hours capability; it
+        #: is read fail-closed when omitted or when it fails.
+        self.session_submission = normalize_session_policy(session_submission)
+        self._provider_extended_hours = provider_extended_hours
         if journal is not None:
             if self.paper_trading.journal is not None and self.paper_trading.journal is not journal:
                 raise ValueError("orchestrator and paper trading must share one journal repository")
@@ -57,6 +73,8 @@ class TradingOrchestrator:
         self._approved = 0
         self._risk_rejected = 0
         self._errors: list[str] = []
+        self._session_blocked = False
+        self._session_reason: str | None = None
 
     @property
     def state(self) -> OrchestratorSnapshot:
@@ -65,6 +83,7 @@ class TradingOrchestrator:
                 self._status, self._last_scan, self._cycle, self._candidates_found,
                 self._candidates_rejected, self._approved, self._risk_rejected,
                 len(self.portfolio.positions), tuple(self._errors),
+                self._session_blocked, self._session_reason,
             )
 
     def start(self) -> None:
@@ -168,6 +187,35 @@ class TradingOrchestrator:
             self._cycle += 1
             cycle = self._cycle
         self._journal_event("CYCLE_STARTED", f"Trading cycle {cycle} started", {"cycle": cycle})
+
+        # Phase 11 checkpoint 2: outside the allowed market session no entry
+        # could be acted on, so the scan is skipped entirely - no market-data
+        # fetch, no strategy evaluation, no AI advisory, no submission
+        # attempt. The refusal is journaled with the calendar's reason and is
+        # never counted as an error: a closed market is a normal state.
+        session = session_gate(
+            timestamp, policy=self.session_submission,
+            provider_extended_hours=self._extended_hours(),
+            asset_class=AssetClass.US_EQUITY)
+        with self._lock:
+            self._session_blocked = not session.allowed
+            self._session_reason = session.reason if not session.allowed else None
+        if not session.allowed:
+            self._journal_event(
+                "CYCLE_SESSION_SKIPPED",
+                f"Trading cycle {cycle} skipped: {session.reason}",
+                {"cycle": cycle, "code": session.code, "reason": session.reason,
+                 "policy": session.policy, "session_state": session.state,
+                 "trading_day": session.is_trading_day})
+            with self._lock:
+                self._last_scan = timestamp
+            self._journal_event(
+                "CYCLE_COMPLETED", f"Trading cycle {cycle} completed",
+                {"cycle": cycle, "candidates": 0, "approved": 0, "rejected": 0,
+                 "session_skipped": True})
+            return CycleResult(cycle, timestamp, (), (), 0, (),
+                               session_skipped=True)
+
         errors: list[str] = []
         approved = []
         analyses = []
@@ -293,6 +341,22 @@ class TradingOrchestrator:
     def _halted(self) -> bool:
         with self._lock:
             return self._emergency_stopped or self._terminated or self._status is OrchestratorStatus.PAUSED
+
+    def _extended_hours(self) -> bool:
+        """The provider's extended-hours capability, read fail-closed.
+
+        The orchestrator is display-and-scan only; the pipeline enforces the
+        same answer at submission time. A provider that cannot be asked (or
+        that fails the question) is treated as unsupported, so the scanner
+        never widens a session the execution layer would refuse.
+        """
+        reporter = self._provider_extended_hours
+        if reporter is None:
+            return False
+        try:
+            return bool(reporter())
+        except Exception:  # noqa: BLE001 - capability bugs must not widen access
+            return False
 
     def _journal_call(self, method: str, *args, **kwargs) -> None:
         if self.journal is None:

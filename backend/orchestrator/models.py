@@ -25,6 +25,11 @@ class OrchestratorSnapshot:
     trades_rejected_by_risk: int
     active_positions: int
     errors: tuple[str, ...]
+    #: Phase 11 checkpoint 2: the market-session gate refused this cycle's
+    #: scan, so no candidate was evaluated. Not an error - the market being
+    #: closed is a normal, expected state.
+    session_blocked: bool = False
+    session_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,3 +41,5 @@ class CycleResult:
     rejected_count: int
     errors: tuple[str, ...]
     ai_analyses: tuple[SetupAnalysis, ...] = ()
+    #: True when the market-session gate refused the scan for this cycle.
+    session_skipped: bool = False

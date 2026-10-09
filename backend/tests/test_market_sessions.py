@@ -382,5 +382,133 @@ class WebhookSessionContractTests(unittest.TestCase):
             runtime.close()
 
 
+class OrchestratorSessionTests(unittest.TestCase):
+    """Checkpoint 2: the scanner does no work when no entry could act."""
+
+    def _orchestrator(self, clock, *, symbols=("AAA",), session_submission="regular",
+                      provider_extended_hours=None, journal=None):
+        from backend.execution import MockExecutionProvider
+        from backend.orchestrator import OrchestratorConfig, OrchestratorStatus, TradingOrchestrator
+        from backend.paper_trading import PaperTradingEngine
+        from backend.risk import RiskEngine
+        from backend.scanner.universe import SymbolUniverse
+        from backend.tests.test_orchestrator import (
+            FixtureMarketData,
+            FixtureScanner,
+            FixtureStrategy,
+            candidate as fixture_candidate,
+        )
+        portfolio = Portfolio(100_000, clock=clock)
+        risk = RiskEngine()
+        # The engine carries the same policy the orchestrator evaluates, exactly
+        # as ApplicationRuntime wires it: scan awareness and submission
+        # enforcement must never disagree about which session is allowed.
+        paper = PaperTradingEngine(risk, portfolio, MockExecutionProvider(),
+                                   journal=journal, clock=clock,
+                                   session_submission=session_submission)
+        scanner = FixtureScanner([fixture_candidate(symbol) for symbol in symbols])
+        orchestrator = TradingOrchestrator(
+            market_data=FixtureMarketData(), scanner=scanner,
+            strategy=FixtureStrategy(), risk_engine=risk, paper_trading=paper,
+            portfolio=portfolio,
+            config=OrchestratorConfig(SymbolUniverse(symbols)),
+            clock=clock, journal=journal,
+            session_submission=session_submission,
+            provider_extended_hours=provider_extended_hours)
+        orchestrator._status = OrchestratorStatus.RUNNING
+        return orchestrator, scanner, paper, portfolio
+
+    def _journal(self):
+        from backend.database import SQLiteJournalRepository
+        return SQLiteJournalRepository(":memory:")
+
+    def test_a_closed_market_skips_the_scan_and_is_not_an_error(self):
+        journal = self._journal()
+        try:
+            saturday = utc(2026, 10, 10, 15, 0)
+            orchestrator, scanner, paper, _ = self._orchestrator(
+                lambda: saturday, journal=journal)
+            result = orchestrator.run_once()
+
+            self.assertTrue(result.session_skipped)
+            self.assertEqual(result.candidates, ())
+            self.assertEqual(result.errors, (), "a closed market is not an error")
+            self.assertEqual(scanner.calls, 0,
+                             "no market data is fetched outside the session")
+            self.assertEqual(len(paper.trades), 0)
+            self.assertEqual(paper.pipeline.orders.list(), ())
+
+            state = orchestrator.state
+            self.assertTrue(state.session_blocked)
+            self.assertIn("closed", (state.session_reason or "").lower())
+            self.assertEqual(state.candidates_found, 0)
+            self.assertEqual(state.errors, ())
+            self.assertIsNotNone(state.last_scan_timestamp,
+                                 "the cycle clock still advances while skipped")
+            events = [event["event_type"] for event in journal.events()]
+            self.assertIn("CYCLE_SESSION_SKIPPED", events)
+            self.assertIn("CYCLE_COMPLETED", events)
+        finally:
+            journal.close()
+
+    def test_the_same_orchestrator_scans_once_the_exchange_reopens(self):
+        holder = {"at": utc(2026, 10, 10, 15, 0)}  # Saturday
+        clock = lambda: holder["at"]  # noqa: E731 - mutable fixture clock
+        journal = self._journal()
+        try:
+            orchestrator, scanner, paper, _ = self._orchestrator(clock, journal=journal)
+            self.assertTrue(orchestrator.run_once().session_skipped)
+
+            holder["at"] = utc(2026, 10, 12, 14, 0)  # Monday 10:00 ET
+            result = orchestrator.run_once()
+
+            self.assertFalse(result.session_skipped)
+            self.assertFalse(orchestrator.state.session_blocked)
+            self.assertIsNone(orchestrator.state.session_reason)
+            self.assertGreater(scanner.calls, 0)
+            self.assertEqual(len(paper.trades), 1)
+            events = [event["event_type"] for event in journal.events()]
+            self.assertIn("SCANNER_CANDIDATE", events)
+        finally:
+            journal.close()
+
+    def test_pre_market_scanning_follows_policy_and_provider_capability(self):
+        pre_market = utc(2026, 10, 8, 12, 0)  # Thursday 08:00 ET
+        supported, scanner, paper, _ = self._orchestrator(
+            lambda: pre_market, session_submission="extended",
+            provider_extended_hours=lambda: True)
+        self.assertFalse(supported.run_once().session_skipped)
+        self.assertGreater(scanner.calls, 0)
+        self.assertEqual(len(paper.trades), 1)
+
+        unsupported, scanner, paper, _ = self._orchestrator(
+            lambda: pre_market, session_submission="extended",
+            provider_extended_hours=lambda: False)
+        result = unsupported.run_once()
+        self.assertTrue(result.session_skipped)
+        self.assertEqual(scanner.calls, 0)
+        self.assertIn("does not support extended-hours",
+                      unsupported.state.session_reason or "")
+
+        regular, scanner, paper, _ = self._orchestrator(
+            lambda: pre_market, session_submission="regular",
+            provider_extended_hours=lambda: True)
+        self.assertTrue(regular.run_once().session_skipped,
+                        "the regular policy never scans pre-market")
+        self.assertEqual(scanner.calls, 0)
+
+    def test_a_failing_capability_caller_never_widens_the_session(self):
+        pre_market = utc(2026, 10, 8, 12, 0)
+
+        def explode():
+            raise RuntimeError("provider capability unavailable")
+
+        orchestrator, scanner, _, _ = self._orchestrator(
+            lambda: pre_market, session_submission="extended",
+            provider_extended_hours=explode)
+        self.assertTrue(orchestrator.run_once().session_skipped)
+        self.assertEqual(scanner.calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

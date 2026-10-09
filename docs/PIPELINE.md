@@ -103,6 +103,18 @@ Refusals carry `PipelineCode.SESSION_BLOCKED`, are journaled through the normal
 the same idempotency key can be retried legally in the next regular session. The webhook layer
 answers `422 SESSION_CLOSED` and deliberately does not remember the signal.
 
+Checkpoint 2 extends the same decision to the scanner: `TradingOrchestrator` evaluates
+`session_gate` at the top of every cycle and, outside the allowed session, fetches no market
+data, evaluates no candidate, runs no AI advisory and attempts no submission. The skip is
+journaled as `CYCLE_SESSION_SKIPPED` with the calendar's reason and is never counted in
+`state.errors`; `last_scan_timestamp` still advances, and the snapshot's `session_blocked` /
+`session_reason` are served through `/api/status`. Scan awareness and submission enforcement
+share one `MARKET_SESSION_SUBMISSION` policy and the same fail-closed provider-capability read,
+so the scanner can never act on a session the pipeline would refuse. Valuation is unaffected by
+the session in the honest direction: with no quotes arriving, positions age from FRESH to STALE
+carrying their last real price and timestamp, automatic exits stay disabled on a stale mark, and
+nothing is ever invented to fill the gap.
+
 Scope: the gate covers **new order submissions** — the pipeline's entry path. Phase 10 exits and
 owner-authorized closes stay ungated, because they are paper-ledger position actions that must
 remain possible outside the session; they are never venue orders.

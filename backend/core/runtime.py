@@ -126,6 +126,8 @@ class ApplicationRuntime:
             ai_analysis=(AIAnalysisService(LocalRuleBasedAnalysisProvider())
                          if self.config.ai.active and self.config.ai.provider == "local" else None),
             journal=self.repository,
+            session_submission=trading.session_submission,
+            provider_extended_hours=self._provider_extended_hours,
         )
         self.performance = PerformanceService(self.repository)
         self.notifier = LocalMockNotifier()
@@ -285,6 +287,19 @@ class ApplicationRuntime:
                                            now=self.clock())
         return report.to_dict()
 
+    def _provider_extended_hours(self) -> bool:
+        """The execution adapter's extended-hours capability, fail-closed.
+
+        Read for display (status) and for the orchestrator's session-aware
+        scanning; the pipeline re-reads it itself at submission time. A
+        provider that cannot answer is treated as unsupported, so no session
+        is ever widened on its behalf.
+        """
+        try:
+            return bool(getattr(self.execution.capabilities(), "extended_hours", False))
+        except Exception:  # noqa: BLE001 - status must not fail on a provider
+            return False
+
     def _market_session_allows_orders(self) -> bool:
         """Whether the session gate would accept a submission right now.
 
@@ -293,14 +308,9 @@ class ApplicationRuntime:
         the provider's extended-hours capability is read fail-closed, so the
         status can never claim "allowed" for a provider that would refuse.
         """
-        try:
-            extended = bool(getattr(self.execution.capabilities(), "extended_hours",
-                                    False))
-        except Exception:  # noqa: BLE001 - status must not fail on a provider
-            extended = False
         return session_gate(
             self.clock(), policy=self.config.trading.session_submission,
-            provider_extended_hours=extended,
+            provider_extended_hours=self._provider_extended_hours(),
             asset_class=AssetClass.US_EQUITY).allowed
 
     def refresh_market(self, symbols=None):
