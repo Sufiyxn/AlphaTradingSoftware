@@ -282,14 +282,17 @@ recovers open orders after a restart.
   `ORDER_NOT_FOUND`, `409` every other non-success.
 - `POST /api/orders/reconcile` (owner token) — `200` with the report; read-only.
 - `POST /api/positions/close` with `{"symbol": "AAPL", "price": 50.5}` (owner token) —
-  `200` `{closed, symbol, quantity, direction, requested_price, realized_pnl, reason:
-  "MANUAL", execution: "PAPER"}`, `400` `INVALID_SYMBOL`/`INVALID_PRICE` for a missing
-  symbol or a price that is absent, non-numeric, zero, negative or non-finite, `404`
-  `POSITION_NOT_FOUND` when nothing is open for that symbol **or** it was already closed,
-  `503` when owner controls are disabled. The price is always supplied by the caller —
-  never defaulted, marked or derived from the entry — and the close runs under the
-  submission lock with the same slippage, fee and journal accounting as an automatic or
-  signal exit.
+  `200` `{closed, symbol, quantity, remaining, partial, direction, requested_price,
+  realized_pnl, reason: "MANUAL", execution: "PAPER"}`, `400` `INVALID_SYMBOL`/`INVALID_PRICE`
+  for a missing symbol or a price that is absent, non-numeric, zero, negative or non-finite,
+  `400` `INVALID_QUANTITY` for a quantity that is not a positive whole number **or** that
+  exceeds what the position holds, `404` `POSITION_NOT_FOUND` when nothing is open for that
+  symbol **or** it was already closed, `503` when owner controls are disabled. The price is
+  always supplied by the caller — never defaulted, marked or derived from the entry — and the
+  close runs under the submission lock with the same slippage, fee and journal accounting as
+  an automatic or signal exit. An optional `quantity` scales the exit down to a **partial
+  close**: the remainder keeps its entry price, `partial: true` with `remaining` reports how
+  much is left, and omitting `quantity` closes everything exactly as before.
 
 `describe()` is the JSON-ready, secret-free view used by the API and the audit trail.
 
@@ -360,3 +363,16 @@ untouched, unknown and already-closed symbols reported as `POSITION_NOT_FOUND`, 
 guard, the `503` when owner controls are disabled, and no credential in any response.
 
 Verification (Phase 10 checkpoint 4): `536 passed, 164 subtests`; HTTP smoke `50/50 checks`.
+
+`backend/tests/test_position_exits.py` also holds Phase 10 checkpoint 5 (20 tests, 25 subtests
+in the file): a partial close through the same owner endpoint leaving the remainder at its
+weighted entry price with `unrealized_pnl: null` while it stays `UNPRICED`, stepwise closes
+summing to exactly what one full close books (checked against the formula and against a
+witness runtime), cash moving only by the proceeds it realized and the whole trade's cash
+netting to its realized P&L, every over-close and non-whole quantity refused with state
+untouched, the trade row staying open with `quantity` shrunk to what is held (and reporting
+the whole trade once the last unit leaves, with P&L covering every step), one
+`PARTIALLY_CLOSED` event per partial close, and a restart restoring the remainder, the cash
+the partials booked, the daily P&L and the close-operation count.
+
+Verification (Phase 10 checkpoint 5): `545 passed, 177 subtests`; HTTP smoke `53/53 checks`.

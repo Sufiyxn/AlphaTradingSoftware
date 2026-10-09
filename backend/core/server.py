@@ -184,7 +184,8 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 if parsed.path == "/api/positions/close":
                     controls.authorize_owner(token)
                     outcome = runtime.close_position(body.get("symbol"),
-                                                     body.get("price"))
+                                                     body.get("price"),
+                                                     body.get("quantity"))
                     status = 200 if outcome.get("closed") else (
                         404 if outcome.get("code") == "POSITION_NOT_FOUND" else 400)
                     return self._send(status, outcome)

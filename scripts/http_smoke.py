@@ -274,13 +274,40 @@ def main() -> int:
             {"Content-Type": "application/json", "X-Owner-Token": owner_token})
         smoke.check("a close without a real price is refused", priceless[0] == 400,
                     str(priceless[1].get("code")))
+        # Phase 10 checkpoint 5: the same endpoint scales out instead of only
+        # ending the position, and a quantity the position does not hold is
+        # refused before anything moves.
+        over_close = smoke.post(
+            "/api/positions/close",
+            json.dumps({"symbol": "AAPL", "price": 50.5, "quantity": 6}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("a close of more than is held is refused",
+                    over_close[0] == 400
+                    and over_close[1].get("code") == "INVALID_QUANTITY",
+                    f"{over_close[0]} {over_close[1].get('code')}")
+        partial = smoke.post(
+            "/api/positions/close",
+            json.dumps({"symbol": "AAPL", "price": 50.5, "quantity": 2}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("a partial close reduces the position and reports the remainder",
+                    partial[0] == 200 and partial[1].get("partial") is True
+                    and partial[1].get("quantity") == 2
+                    and partial[1].get("remaining") == 3,
+                    f"{partial[0]} {partial[1].get('code')}")
+        _, reduced = smoke.get("/api/positions")
+        remaining = reduced.get("positions") or []
+        smoke.check("the remainder stays open at three shares",
+                    len(remaining) == 1 and remaining[0].get("quantity") == 3,
+                    str(remaining))
         closed = smoke.post(
             "/api/positions/close",
             json.dumps({"symbol": "AAPL", "price": 50.5}).encode("utf-8"),
             {"Content-Type": "application/json", "X-Owner-Token": owner_token})
-        smoke.check("the owner close closes the paper position",
+        smoke.check("the owner close closes what is left of the paper position",
                     closed[0] == 200 and closed[1].get("closed") is True
                     and closed[1].get("execution") == "PAPER"
+                    and closed[1].get("partial") is False
+                    and closed[1].get("quantity") == 3
                     and isinstance(closed[1].get("realized_pnl"), (int, float)),
                     f"{closed[0]} {closed[1].get('code')}")
         _, emptied = smoke.get("/api/positions")

@@ -32,6 +32,7 @@ def reconcile_journal(*, portfolio, engine: PaperTradingEngine, repository,
     # actually exist afterwards - a malformed row cannot move money silently.
     restored = 0
     restored_entries = []
+    restored_rows = []
     skipped = 0
     for row in open_rows:
         parsed = _open_row(row)
@@ -48,15 +49,30 @@ def reconcile_journal(*, portfolio, engine: PaperTradingEngine, repository,
             continue
         engine.restore_trade(record, _trade_setup(row))
         restored_entries.append((direction, quantity, entry_price))
+        restored_rows.append(row)
         restored += 1
 
     cash = float(starting_cash)
     realized = 0.0
     daily = 0.0
     closed_ok = 0
+    close_operations = 0
 
     for direction, quantity, entry_price in restored_entries:
         cash -= _sign(direction) * quantity * entry_price
+
+    # A partial close is real money: the position shrinks (already restored
+    # above at its remaining quantity) but the trade row is still open, so its
+    # realized P&L lives only in the trade's context and must be added here -
+    # otherwise a restart would hand back less cash than the book recorded.
+    # Every recorded close - partial or final - is also one trade-count
+    # operation, matching what the running portfolio counted.
+    for row in restored_rows:
+        total, same_day = _partial_realized(row, now.date())
+        realized += total
+        cash += total
+        daily += same_day
+        close_operations += _partial_count(row)
 
     for row in closed_rows:
         parsed = _closed_row(row)
@@ -72,9 +88,12 @@ def reconcile_journal(*, portfolio, engine: PaperTradingEngine, repository,
         if exit_at is not None and exit_at.date() == now.date():
             daily += pnl
         closed_ok += 1
+        # Its partial closes were separate close operations too; the final
+        # close recorded in `pnl` above is this row's own operation.
+        close_operations += 1 + _partial_count(row)
 
     portfolio.restore_ledger(cash=cash, realized_pnl=realized, daily_pnl=daily,
-                             trade_count=closed_ok, day=now.date())
+                             trade_count=close_operations, day=now.date())
 
     summary = {"restored": restored > 0, "open_positions": restored,
                "closed_trades": closed_ok, "skipped_rows": skipped,
@@ -204,6 +223,45 @@ def _closed_row(row) -> tuple[str, Direction, int, float, float] | None:
     if not isinstance(pnl, (int, float)):
         return None
     return symbol, direction, quantity, entry_price, float(pnl)
+
+
+def _partial_realized(row, today) -> tuple[float, float]:
+    """Realized P&L an open trade booked through partial closes.
+
+    Returns the total and the part landing on ``today`` (for daily P&L), read
+    from the partial closes the journal recorded. A trade that was never
+    partially closed contributes nothing.
+    """
+    details = row.get("context_json")
+    if not isinstance(details, dict):
+        return 0.0, 0.0
+    entries = details.get("partials")
+    if not isinstance(entries, list):
+        return 0.0, 0.0
+    total = 0.0
+    same_day = 0.0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        pnl = entry.get("pnl")
+        if not isinstance(pnl, (int, float)) or isinstance(pnl, bool):
+            continue
+        total += float(pnl)
+        at = _parse_timestamp(entry.get("timestamp"))
+        if at is not None and at.date() == today:
+            same_day += float(pnl)
+    return total, same_day
+
+
+def _partial_count(row) -> int:
+    """How many partial closes the journal recorded for this trade."""
+    details = row.get("context_json")
+    if not isinstance(details, dict):
+        return 0
+    entries = details.get("partials")
+    if not isinstance(entries, list):
+        return 0
+    return sum(1 for entry in entries if isinstance(entry, dict))
 
 
 def _trade_record(row, direction: Direction) -> PaperTradeRecord | None:

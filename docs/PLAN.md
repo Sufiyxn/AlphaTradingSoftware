@@ -46,14 +46,16 @@
 > journal) is implemented and verified — `509 passed, 150 subtests`; checkpoint 3 (positions are
 > booked from durable fills, exactly once) is implemented and verified — `523 passed, 150
 > subtests`; checkpoint 4 (owner-authorized exit as a first-class path) is implemented and
-> verified — `536 passed, 164 subtests`; `tsc --noEmit` clean; `npm run build` succeeds; HTTP
-> smoke passed with 50 checks and is now committed as `scripts/http_smoke.py` (the four
-> documented endpoints parsed as JSON, a signed paper trade whose order, fill, position, risk
-> decision and activity rows are all served over HTTP, replay and missing-authentication
-> refusals, owner-token guards, read-only reconcile, the owner close with its token guard,
-> refused price, second-close refusal and emptied position list, the durable fill journal
-> exported, and no credential in any response body) — checkpoints 5–6 (partial exit, stop/target
-> adjustment) are defined below and have not started.**
+> verified — `536 passed, 164 subtests`; checkpoint 5 (a partial exit that scales a position
+> out) is implemented and verified — `545 passed, 177 subtests`; `tsc --noEmit` clean; `npm run
+> build` succeeds; HTTP smoke passed with 53 checks and is now committed as
+> `scripts/http_smoke.py` (the four documented endpoints parsed as JSON, a signed paper trade
+> whose order, fill, position, risk decision and activity rows are all served over HTTP, replay
+> and missing-authentication refusals, owner-token guards, read-only reconcile, the owner close
+> with its token guard, refused price, refused over-close, partial close with its remainder,
+> second-close refusal and emptied position list, the durable fill journal exported, and no
+> credential in any response body) — checkpoint 6 (stop/target adjustment) is defined below and
+> has not started.**
 
 ---
 
@@ -600,7 +602,7 @@ Delivered scope (as approved):
   final P&L; dynamic position management; scaling/adjustment where supported; positions remain
   `UNPRICED` until a fresh real mark exists.
 
-#### Phase 10 checkpoints 4–6 (CP1–CP4 complete; CP5–CP6 defined below, not started)
+#### Phase 10 checkpoints 4–6 (CP1–CP5 complete; CP6 defined below, not started)
 
 Checkpoints 1–3 made *entry* deterministic: provider-order identity, durable fill identity, and
 positions booked from durable fills, exactly once. Reading the phase's own remaining words —
@@ -651,6 +653,13 @@ as done when its acceptance criteria and regression tests pass.
 - *Regression tests:* `backend/tests/test_position_exits.py` extended (remainder entry/quantity,
   P&L additivity, trade-row lifecycle, over-close refusal, exposure after partial).
 - *Depends on:* CP4.
+- *Status:* **DONE** — optional `quantity` on `PaperTradingEngine.close()` and
+  `POST /api/positions/close`; partial closes journal `record_trade_partial` (trade row stays
+  open with `quantity` shrunk to what is held, `partials`/`closed_quantity`/`realized_pnl`
+  accumulated in `context_json`), the final close folds every step into the row's total P&L,
+  average exit price and closed quantity, and `reconcile_journal` rebuilds the partials' cash,
+  realized/daily P&L and close-operation count on restart; verified `545 passed, 177
+   subtests` and `53/53` HTTP-smoke checks.
 
 **Checkpoint 6 — risk changes: stop/target adjustment on an open position.**
 - *Outstanding gap:* the phase requires *risk changes* and *dynamic position management*; stop

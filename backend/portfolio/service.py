@@ -121,6 +121,8 @@ class Portfolio:
         self.cash += sign * quantity * price - fees
         self.realized_pnl += pnl
         self.daily_pnl += pnl
+        # One count per close operation: a partial close is a close too. The
+        # journal rebuild mirrors this by counting recorded partial closes.
         self.trade_count += 1
         remaining = position.quantity - quantity
         if remaining:

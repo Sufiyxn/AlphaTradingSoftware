@@ -197,15 +197,18 @@ class ApplicationRuntime:
         with self.paper.pipeline.submission_lock:
             return self.orders.cancel(str(order_id or "")).to_dict()
 
-    def close_position(self, symbol, price) -> dict:
-        """Owner-authorized close of one open paper position (phase 10 CP4).
+    def close_position(self, symbol, price, quantity=None) -> dict:
+        """Owner-authorized close of one open paper position (phase 10 CP4/CP5).
 
         The exit price is supplied by the caller and is never defaulted,
         marked or derived from the entry: a fabricated exit price would be a
-        fabricated P&L. The close runs under the submission lock so it cannot
-        interleave with a submission or a booking, and it reuses the same
-        slippage, fee, journal and trade-close accounting as an automatic or
-        signal-driven exit.
+        fabricated P&L. An optional quantity scales the exit down to a partial
+        close - it defaults to the whole position, so the original CP4
+        behaviour is unchanged - and a quantity the position does not hold is
+        refused before anything moves. The close runs under the submission lock
+        so it cannot interleave with a submission or a booking, and it reuses
+        the same slippage, fee, journal and trade-close accounting as an
+        automatic or signal-driven exit.
         """
         name = str(symbol or "").strip().upper()
         if not name:
@@ -215,21 +218,35 @@ class ApplicationRuntime:
                 or not math.isfinite(price) or price <= 0):
             return {"closed": False, "code": "INVALID_PRICE",
                     "error": "price must be a positive finite number"}
+        if quantity is not None:
+            if (isinstance(quantity, bool) or not isinstance(quantity, (int, float))
+                    or not math.isfinite(quantity) or quantity != int(quantity)
+                    or quantity <= 0):
+                return {"closed": False, "code": "INVALID_QUANTITY",
+                        "error": "quantity must be a positive whole number"}
+            quantity = int(quantity)
         with self.paper.pipeline.submission_lock:
             position = next((item for item in self.portfolio.positions
                              if item.symbol == name), None)
             if position is None:
                 return {"closed": False, "code": "POSITION_NOT_FOUND",
                         "error": f"no open position exists for {name}"}
-            quantity = position.quantity
+            held = position.quantity
+            if quantity is not None and quantity > held:
+                return {"closed": False, "code": "INVALID_QUANTITY",
+                        "error": f"{name} holds {held}; cannot close {quantity}"}
+            closing = held if quantity is None else quantity
             direction = position.direction.value
             try:
                 realized = self.paper.close(name, float(price),
-                                            timestamp=self.clock())
+                                            timestamp=self.clock(),
+                                            quantity=closing)
             except (KeyError, ValueError) as error:
                 return {"closed": False, "code": "CLOSE_FAILED",
                         "error": str(error)}
-        return {"closed": True, "symbol": name, "quantity": quantity,
+        remaining = held - closing
+        return {"closed": True, "symbol": name, "quantity": closing,
+                "remaining": remaining, "partial": remaining > 0,
                 "direction": direction, "requested_price": float(price),
                 "realized_pnl": realized, "reason": "MANUAL",
                 "execution": "PAPER"}

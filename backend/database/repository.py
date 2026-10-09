@@ -132,11 +132,66 @@ class SQLiteJournalRepository:
 
     def record_trade_close(self, order_id: str, timestamp: datetime, exit_price: float, pnl: float,
                            *, context: Any = None) -> None:
-        current = self._query("SELECT context_json FROM trades WHERE trade_id=?", (order_id,), ("context_json",))
+        current = self._query(
+            "SELECT quantity, context_json FROM trades WHERE trade_id=?",
+            (order_id,), ("context_json",))
         details = current[0]["context_json"] if current else {}
+        if not isinstance(details, dict):
+            details = {}
+        held = current[0].get("quantity") if current else None
+        held = float(held) if isinstance(held, (int, float)) else 0.0
+        partials = details.get("partials")
+        partials = [item for item in partials if isinstance(item, dict)] \
+            if isinstance(partials, list) else []
+        if partials:
+            # A trade closed in steps reports the P&L and the average exit the
+            # whole trade actually produced, not just the last chunk.
+            weighted = sum(float(item.get("quantity") or 0) * float(item.get("price") or 0)
+                           for item in partials)
+            partial_quantity = float(details.get("closed_quantity") or 0)
+            total_quantity = partial_quantity + held
+            if total_quantity > 0:
+                exit_price = (weighted + exit_price * held) / total_quantity
+            pnl += float(details.get("realized_pnl") or 0)
+            details["closed_quantity"] = total_quantity
+            held = total_quantity
         details["close"] = context or {}
-        self._execute("""UPDATE trades SET exit_timestamp=?,exit_price=?,pnl=?,context_json=? WHERE trade_id=?""",
-                      (timestamp.isoformat(), exit_price, pnl, to_json(details), order_id))
+        self._execute(
+            """UPDATE trades SET exit_timestamp=?,exit_price=?,pnl=?,quantity=?,context_json=?
+               WHERE trade_id=?""",
+            (timestamp.isoformat(), exit_price, pnl, held, to_json(details), order_id))
+
+    def record_trade_partial(self, order_id: str, timestamp: datetime, price: float,
+                             quantity: float, pnl: float, *, context: Any = None) -> None:
+        """Record one partial close on a trade that stays open.
+
+        The trade row keeps `exit_timestamp` NULL (it is not closed until the
+        last unit leaves), its `quantity` shrinks to what the position still
+        holds so a restart restores the remainder, and `context_json`
+        accumulates every partial close with its realized P&L - the cash a
+        restart has to rebuild from.
+        """
+        current = self._query(
+            "SELECT quantity, context_json FROM trades WHERE trade_id=?",
+            (order_id,), ("context_json",))
+        if not current:
+            return
+        held = current[0].get("quantity")
+        if not isinstance(held, (int, float)) or quantity <= 0 or quantity > held:
+            raise ValueError("a partial close must not exceed the trade quantity")
+        details = current[0]["context_json"]
+        if not isinstance(details, dict):
+            details = {}
+        partials = details.get("partials")
+        partials = list(partials) if isinstance(partials, list) else []
+        partials.append({"timestamp": timestamp.isoformat(), "quantity": quantity,
+                         "price": price, "pnl": pnl})
+        details["partials"] = partials
+        details["closed_quantity"] = float(details.get("closed_quantity") or 0) + quantity
+        details["realized_pnl"] = float(details.get("realized_pnl") or 0) + pnl
+        details["last_partial_context"] = context or {}
+        self._execute("UPDATE trades SET quantity=?, context_json=? WHERE trade_id=?",
+                      (held - quantity, to_json(details), order_id))
 
     def record_ai_analysis(self, analysis: Any) -> None:
         self._insert("ai_analyses", (analysis.timestamp.isoformat(), analysis.symbol.strip().upper(),

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import logging
+import math
 import re
 from dataclasses import replace
 
@@ -427,28 +428,59 @@ class PaperTradingEngine:
                 closed.append(record)
         return tuple(closed)
 
-    def close(self, symbol: str, price: float, timestamp: datetime | None = None) -> float:
-        """Owner-authorized manual close. A real exit price is always required."""
+    def close(self, symbol: str, price: float, timestamp: datetime | None = None,
+              quantity: int | None = None) -> float:
+        """Owner-authorized manual close. A real exit price is always required.
+
+        ``quantity`` scales the exit down to a partial close; omitted it closes
+        the whole position, which is what every existing caller asks for. A
+        quantity the position does not hold is refused before any state moves.
+        """
+        symbol = symbol.strip().upper()
         position = next((item for item in self.portfolio.positions
-                         if item.symbol == symbol.strip().upper()), None)
+                         if item.symbol == symbol), None)
         if position is None:
             raise KeyError(symbol)
         if price is None:
             raise ValueError("a manual close requires an explicit real exit price")
+        q = position.quantity if quantity is None else quantity
+        if (isinstance(q, bool) or not isinstance(q, (int, float))
+                or not math.isfinite(q) or q != int(q)
+                or q <= 0 or q > position.quantity):
+            raise ValueError("invalid close quantity")
+        q = int(q)
         sign = 1 if position.direction is Direction.LONG else -1
         fill = price - sign * self.config.slippage_per_share
-        fees = position.quantity * self.config.commission_per_share
+        fees = q * self.config.commission_per_share
         closed_at = timestamp or self.clock()
-        pnl = self.portfolio.close_position(symbol, price=fill, fees=fees, timestamp=closed_at)
+        pnl = self.portfolio.close_position(symbol, quantity=q, price=fill,
+                                            fees=fees, timestamp=closed_at)
+        remaining = position.quantity - q
+        partial = remaining > 0
         for order_id, record in tuple(self._records.items()):
-            if record.symbol == symbol.strip().upper():
-                trade_pnl = (fill - record.entry_price) * sign * record.quantity - record.quantity * self.config.commission_per_share
-                self._journal_call("record_trade_close", order_id, closed_at, fill, trade_pnl,
-                                   context={"reason": "MANUAL", "portfolio_realized_pnl": pnl})
-                self._journal_call("record_position_event", closed_at, record.symbol, "CLOSED",
-                                   {"order_id": order_id, "quantity": record.quantity, "price": fill,
-                                    "pnl": trade_pnl, "reason": "MANUAL"})
-                self._forget(order_id)
+            if record.symbol != symbol:
+                continue
+            trade_pnl = ((fill - record.entry_price) * sign * q
+                         - q * self.config.commission_per_share)
+            if partial:
+                self._journal_call(
+                    "record_trade_partial", order_id, closed_at, fill, q, trade_pnl,
+                    context={"reason": "MANUAL", "portfolio_realized_pnl": pnl,
+                             "remaining": remaining})
+                self._journal_call(
+                    "record_position_event", closed_at, symbol, "PARTIALLY_CLOSED",
+                    {"order_id": order_id, "quantity": q, "price": fill,
+                     "pnl": trade_pnl, "remaining": remaining, "reason": "MANUAL"})
+                # The trade keeps the quantity the position still holds, so a
+                # restart restores exactly what is left, never the original.
+                self._records[order_id] = replace(record, quantity=record.quantity - q)
+                continue
+            self._journal_call("record_trade_close", order_id, closed_at, fill, trade_pnl,
+                               context={"reason": "MANUAL", "portfolio_realized_pnl": pnl})
+            self._journal_call("record_position_event", closed_at, symbol, "CLOSED",
+                               {"order_id": order_id, "quantity": record.quantity,
+                                "price": fill, "pnl": trade_pnl, "reason": "MANUAL"})
+            self._forget(order_id)
         return pnl
 
     def _forget(self, order_id: str) -> None:
