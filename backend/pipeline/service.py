@@ -49,6 +49,11 @@ from backend.execution.models import (
     OrderType,
     normalize_order_status,
 )
+from backend.market_data.session import (
+    asset_class_for_symbol,
+    normalize_session_policy,
+    session_gate,
+)
 from backend.orders import (
     Order,
     OrderIntent,
@@ -137,12 +142,17 @@ class TradingPipeline:
 
     def __init__(self, *, connections: ConnectionManager, risk_engine: RiskEngine,
                  portfolio: Portfolio, journal=None, clock,
-                 connection_id: str = "paper") -> None:
+                 connection_id: str = "paper",
+                 session_submission: str = "regular") -> None:
         self._connections = connections
         self._risk_engine = risk_engine
         self._portfolio = portfolio
         self._clock = clock
         self._default_connection_id = str(connection_id or "paper")
+        #: Phase 11: which market sessions accept a new submission. Validated
+        #: here as well as in config so a direct constructor call cannot
+        #: smuggle in an unknown policy.
+        self._session_submission = normalize_session_policy(session_submission)
         self._lock = threading.Lock()
         #: One re-entrant lock for the whole risk -> order -> submit -> record
         #: path. The paper engine re-enters it while booking the fill, so a
@@ -161,6 +171,11 @@ class TradingPipeline:
     @property
     def connections(self) -> ConnectionManager:
         return self._connections
+
+    @property
+    def session_submission(self) -> str:
+        """The market-session policy this pipeline enforces (Phase 11)."""
+        return self._session_submission
 
     @property
     def journal(self):
@@ -378,6 +393,20 @@ class TradingPipeline:
         if limitation is not None:
             return self._outcome(
                 request, code=PipelineCode.CAPABILITY_UNAVAILABLE, reason=limitation,
+                risk=decision, connection=record, safety_reason=safety_reason)
+
+        # 7b. refuse submissions outside the allowed market session --------
+        #     The calendar answers, never the provider: a weekend or holiday
+        #     is refused before an order can be created, and the refusal
+        #     carries its own code so it is distinguishable from risk,
+        #     capability, and provider failures in the ledger.
+        session = session_gate(
+            self._clock(), policy=self._session_submission,
+            provider_extended_hours=bool(getattr(capabilities, "extended_hours", False)),
+            asset_class=asset_class_for_symbol(request.setup.symbol))
+        if not session.allowed:
+            return self._outcome(
+                request, code=PipelineCode.SESSION_BLOCKED, reason=session.reason,
                 risk=decision, connection=record, safety_reason=safety_reason)
 
         # 8. submit through the verified adapter ------------------------------

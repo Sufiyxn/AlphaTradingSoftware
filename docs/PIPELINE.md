@@ -39,6 +39,15 @@ signal source (TradingView alert | scanner cycle | internal)
        6. execution safety gate   - ExecutionSafetyGate.authorize(mode)
                                      -> KILL_SWITCH / SAFETY_REJECTED
        7. mode + capabilities     - UNSUPPORTED_MODE / CAPABILITY_UNAVAILABLE
+       7b. market-session gate    - backend/market_data/session.session_gate: the calendar and
+                                     the configured MARKET_SESSION_SUBMISSION policy decide
+                                     whether a *new* submission may leave the platform;
+                                     weekends, market holidays, and the regular-session
+                                     boundary are enforced here, and the provider's declared
+                                     extended-hours capability is required before an
+                                     extended policy can allow a pre/after-hours order
+                                     -> SESSION_BLOCKED (no order is created; the same intent
+                                        is retried legally in the next regular session)
        8. submit                  - connections.adapter_for(id).place_order(...) - the only
                                      place_order call in the product outside backend/execution/
                                      classified failures -> PROVIDER_AUTH_FAILURE /
@@ -70,6 +79,37 @@ Fail-closed ordering matters: invalid input and stale signals are refused **befo
 evaluated, an unresolvable connection is refused before risk, risk runs before the gate, and the
 adapter is touched last. A gate block does not hide the risk decision — risk is still evaluated
 and journaled so the record shows what risk said.
+
+## Market-session gate (Phase 11)
+
+`backend/market_data/session.py` is the single session authority: `market_session(at)` answers
+what time it is at the exchange, and `session_gate(at, *, policy, provider_extended_hours,
+asset_class)` answers whether an order may be submitted right now, as a `SessionDecision`
+(`allowed`, machine `code`, exchange `state`, `reason`).
+
+| Policy (`MARKET_SESSION_SUBMISSION`) | Allows |
+|---|---|
+| `regular` (default) | the regular session only (09:30–16:00 exchange local, including an early close such as 13:00 the day after Thanksgiving) |
+| `extended` | the regular session **plus** pre/after-hours inside this platform's configured window (04:00–20:00 exchange local), and only when the connected execution provider declares `extended_hours` capability |
+
+Both policies refuse weekends, market holidays (the calendar derives them, including observed
+Sat/Sun shifts and the Good Friday / day-after-Thanksgiving early closes), unknown asset classes
+(fail closed: no calendar, no order), and instants outside the allowed window. The calendar is
+the only source of the answer — a provider never widens it, it can only narrow the `extended`
+policy further.
+
+Refusals carry `PipelineCode.SESSION_BLOCKED`, are journaled through the normal
+`EXECUTION_REJECTED` event with that code and the calendar's reason, and create **no** order, so
+the same idempotency key can be retried legally in the next regular session. The webhook layer
+answers `422 SESSION_CLOSED` and deliberately does not remember the signal.
+
+Scope: the gate covers **new order submissions** — the pipeline's entry path. Phase 10 exits and
+owner-authorized closes stay ungated, because they are paper-ledger position actions that must
+remain possible outside the session; they are never venue orders.
+
+`GET /api/status` reports `market_session`, `market_trading_day`, `market_session_policy`, and
+`market_session_orders_allowed` (the same decision, recomputed for display, reading the
+provider's extended-hours capability fail-closed).
 
 ## Risk controls (Phase 8)
 
@@ -184,7 +224,7 @@ What the pipeline adds to the risk story:
 ## Rejection codes
 
 `PipelineCode` (`backend/pipeline/models.py`) is the stable machine vocabulary; `ALL_CODES`
-lists all 18 and a test asserts the set never drifts silently.
+lists all 19 and a test asserts the set never drifts silently.
 
 | Code | Meaning |
 |---|---|
@@ -206,6 +246,7 @@ lists all 18 and a test asserts the set never drifts silently.
 | `PROVIDER_RATE_LIMIT` | The adapter throttled the request. |
 | `PROVIDER_EXECUTION_REJECTION` | The provider answered but did not fill the order. |
 | `PROVIDER_ID_COLLISION` | The provider's order identity is already owned by another local order; it was not registered. |
+| `SESSION_BLOCKED` | The market-session gate refused the submission: outside the allowed trading window for the configured `MARKET_SESSION_SUBMISSION` policy (weekend, market holiday, regular-session boundary, or an extended-hours order the provider cannot place). No order is created; the same intent is legal again in the next regular session. |
 
 ## How each signal path maps the result
 
@@ -218,6 +259,7 @@ lists all 18 and a test asserts the set never drifts silently.
 | `STALE_SIGNAL` | `400 INVALID_PAYLOAD` / `STALE_TIMESTAMP` |
 | `INVALID_REQUEST` | `400 INVALID_PAYLOAD` |
 | risk not approved (`RISK_REJECTED`, `KILL_SWITCH`) | `422 RISK_REJECTED` with `reasons` |
+| `SESSION_BLOCKED` | `422 SESSION_CLOSED` with the calendar's reason; never remembered as a replay, because the same alert is legitimate in the next regular session |
 | anything else / no trade | `503 EXECUTION_UNAVAILABLE` with `order_status`/`rejection_reason` when an order exists |
 | unexpected exception | `500 INTERNAL_ERROR` |
 

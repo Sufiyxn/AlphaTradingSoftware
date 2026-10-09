@@ -20,7 +20,11 @@ def setup(symbol="ABC", direction=Direction.LONG, ratio=2.0):
 
 def paper(*, execution=None, config=None, risk=None):
     portfolio = Portfolio(100_000)
-    engine = PaperTradingEngine(risk or RiskEngine(), portfolio, execution, config)
+    # A deterministic clock: the Phase 11 session gate refuses submissions
+    # outside the regular session, so these tests must not depend on the host
+    # clock's market hours. NOW is a Monday 10:00 ET instant.
+    engine = PaperTradingEngine(risk or RiskEngine(), portfolio, execution, config,
+                                clock=lambda: NOW)
     return engine, portfolio
 
 

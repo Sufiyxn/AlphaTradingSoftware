@@ -37,6 +37,8 @@ class PipelineCode:
     RISK_REJECTED = "RISK_REJECTED"
     KILL_SWITCH = "KILL_SWITCH"
     SAFETY_REJECTED = "SAFETY_REJECTED"
+    # market session (Phase 11): the calendar refused the submission
+    SESSION_BLOCKED = "SESSION_BLOCKED"
     # connection selection and readiness
     CONNECTION_NOT_FOUND = "CONNECTION_NOT_FOUND"
     CONNECTION_NOT_READY = "CONNECTION_NOT_READY"

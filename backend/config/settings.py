@@ -6,6 +6,7 @@ serialized into an API response, a log line, or the SQLite journal.
 """
 from dataclasses import dataclass
 
+from backend.market_data.session import SESSION_POLICIES
 from backend.modes import ModeSelection, TradingMode, parse_mode
 
 
@@ -62,6 +63,11 @@ class TradingSettings:
     history_lookback_days: float = 90.0
     max_candidate_price: float = 100.0
     paper_starting_cash: float = 100_000.0
+    #: Phase 11: which market sessions accept a *new* order submission.
+    #: ``regular`` (default) = the regular session only; ``extended`` also
+    #: accepts pre/after-hours when the provider supports extended hours.
+    #: Weekends and market holidays are refused under either policy.
+    session_submission: str = "regular"
 
     def __post_init__(self) -> None:
         if self.scan_interval_seconds <= 0:
@@ -74,6 +80,10 @@ class TradingSettings:
             raise ValueError("paper_starting_cash must be positive")
         if not self.universe:
             raise ValueError("at least one watchlist symbol is required")
+        if self.session_submission not in SESSION_POLICIES:
+            raise ValueError(
+                "session_submission must be one of "
+                f"{SESSION_POLICIES}, received {self.session_submission!r}")
 
     @property
     def selection(self) -> ModeSelection:
@@ -88,6 +98,7 @@ class TradingSettings:
             "history_lookback_days": self.history_lookback_days,
             "max_candidate_price": self.max_candidate_price,
             "paper_starting_cash": self.paper_starting_cash,
+            "session_submission": self.session_submission,
         }
 
 

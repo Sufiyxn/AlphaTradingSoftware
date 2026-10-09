@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from backend.market_data.session import normalize_session_policy
 from backend.modes import ModeSelection, TradingMode, parse_mode
 from backend.risk.config import RiskConfig
 from backend.strategies.models import StrategyConfig
@@ -173,6 +174,8 @@ def _trading_settings(env: Mapping[str, str]) -> TradingSettings:
             _get(env, "MAX_CANDIDATE_PRICE"), default=100.0, name="MAX_CANDIDATE_PRICE"),
         paper_starting_cash=parse_number(
             _get(env, "PAPER_STARTING_CASH"), default=100_000.0, name="PAPER_STARTING_CASH"),
+        session_submission=normalize_session_policy(
+            _get(env, "MARKET_SESSION_SUBMISSION")),
     )
 
 

@@ -131,7 +131,7 @@ Every response is JSON: `{"status", "code", "message", "reason", ...}`.
 | 401 | `AUTH_FAILED` | Missing or wrong HMAC signature or payload secret |
 | 409 | `DUPLICATE_SIGNAL` | The same event id or body was already processed; no second order |
 | 413 | `PAYLOAD_TOO_LARGE` | Body exceeds `TRADINGVIEW_MAX_BODY_BYTES` |
-| 422 | `RISK_REJECTED` / `NO_OPEN_POSITION` / `QUANTITY_MISMATCH` | Business rejection; nothing executed |
+| 422 | `RISK_REJECTED` / `SESSION_CLOSED` / `NO_OPEN_POSITION` / `QUANTITY_MISMATCH` | Business rejection; nothing executed. `SESSION_CLOSED` means the market-session gate refused a new entry (weekend, market holiday, or outside the allowed trading window) |
 | 503 | `NOT_CONFIGURED` / `EXECUTION_UNAVAILABLE` | Endpoint not enabled/configured, or the paper engine could not fill |
 | 500 | `INTERNAL_ERROR` | Unexpected failure; nothing further was attempted |
 
@@ -146,8 +146,11 @@ An `ACCEPTED` entry response includes `signal_id`, `symbol`, `action`, `order_id
   the payload supplies one.
 - Accepted signals and terminal business rejections (422) are remembered in the SQLite event
   journal as `SIGNAL_PROCESSED`; a replay, including after a restart, returns `409` and
-  creates no duplicate order. Auth failures, validation failures, and 5xx outcomes are not
-  remembered, so a corrected retry is processed normally.
+  creates no duplicate order. **`SESSION_CLOSED` is the exception**: the market-session gate
+  refuses a submission because of *when* it arrived, not because of the signal itself, so it is
+  never remembered and never becomes a duplicate — the identical alert is retried normally in the
+  next regular session. Auth failures, validation failures, and 5xx outcomes are not
+  remembered either, so a corrected retry is processed normally.
 - Events are journaled as `TV_SIGNAL_RECEIVED`, `TV_SIGNAL_REJECTED`, and
   `TV_SIGNAL_DUPLICATE`.
 

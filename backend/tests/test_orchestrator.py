@@ -105,7 +105,8 @@ class TradingOrchestratorTests(unittest.TestCase):
         portfolio = Portfolio(100_000)
         risk = EventRisk(risk_config, reject=risk_rejections, events=events)
         execution = EventExecution(events, fail_orders=execution_fail)
-        paper = PaperTradingEngine(risk, portfolio, execution, journal=journal)
+        paper = PaperTradingEngine(risk, portfolio, execution, journal=journal,
+                                   clock=clock)
         scanner = FixtureScanner(candidates if candidates is not None else [candidate(symbol) for symbol in symbols])
         orchestrator = TradingOrchestrator(
             market_data=FixtureMarketData(market_failures), scanner=scanner,
@@ -252,7 +253,7 @@ class TradingOrchestratorTests(unittest.TestCase):
         portfolio = FailingPortfolio(100_000)
         risk = EventRisk(events=events)
         execution = EventExecution(events)
-        paper = PaperTradingEngine(risk, portfolio, execution)
+        paper = PaperTradingEngine(risk, portfolio, execution, clock=lambda: NOW)
         orchestrator = TradingOrchestrator(
             market_data=FixtureMarketData(),
             scanner=FixtureScanner([candidate("BADPORT"), candidate("GOOD")]),

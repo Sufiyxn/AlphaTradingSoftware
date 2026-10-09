@@ -27,23 +27,43 @@ from .provider import (
 )
 from .registry import build_market_data_provider, is_implemented
 from .service import MarketDataService
-from .session import USMarketSession, market_session
+from .session import (
+    DEFAULT_SESSION_POLICY,
+    EXTENDED_HOURS_UNSUPPORTED,
+    MARKET_CLOSED,
+    OUTSIDE_ALLOWED_WINDOW,
+    SESSION_OK,
+    SESSION_POLICIES,
+    UNKNOWN_ASSET_CLASS,
+    USMarketSession,
+    AssetClass,
+    SessionDecision,
+    asset_class_for_symbol,
+    market_session,
+    normalize_session_policy,
+    session_gate,
+)
 from .unconfigured import UnconfiguredMarketDataProvider
 from .validation import DataValidationError, normalize_bar, normalize_quote
 
 __all__ = [
+    "AssetClass",
     "Bar",
     "BridgeReport",
     "CONNECTED",
+    "DEFAULT_SESSION_POLICY",
     "DataValidationError",
     "ERROR",
+    "EXTENDED_HOURS_UNSUPPORTED",
     "HttpResponse",
     "HttpTransport",
+    "MARKET_CLOSED",
     "MarketDataBridge",
     "MarketDataProvider",
     "MarketDataProviderError",
     "MarketDataService",
     "NOT_CONFIGURED",
+    "OUTSIDE_ALLOWED_WINDOW",
     "PRICED",
     "ProviderAuthenticationError",
     "ProviderConnectionError",
@@ -54,15 +74,22 @@ __all__ = [
     "ProviderUnavailableError",
     "QUOTE_UNPRICED",
     "Quote",
+    "SESSION_OK",
+    "SESSION_POLICIES",
     "STALE",
+    "SessionDecision",
     "SymbolValuation",
     "UNAVAILABLE",
+    "UNKNOWN_ASSET_CLASS",
     "USMarketSession",
     "UnconfiguredMarketDataProvider",
     "UrllibTransport",
+    "asset_class_for_symbol",
     "build_market_data_provider",
     "is_implemented",
     "market_session",
     "normalize_bar",
     "normalize_quote",
+    "normalize_session_policy",
+    "session_gate",
 ]

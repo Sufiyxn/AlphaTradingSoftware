@@ -1,6 +1,17 @@
-"""Standard-library US equity session calendar and current session state."""
+"""Standard-library US equity session calendar and current session state.
+
+Phase 11 checkpoint 1 extends this module from *awareness* to *enforcement*:
+``market_session`` still answers what time it is at the exchange, and the new
+``session_gate`` answers the only question the execution pipeline may ask -
+"may an order be submitted right now, for this asset class, with this
+provider?" - as a machine-readable decision instead of a boolean.
+
+Everything here is computed from the calendar (weekdays, observed market
+holidays, daylight-saving rules, early closes). No network, no vendor call,
+no fabricated state: when the exchange is closed the answer is closed.
+"""
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, tzinfo
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 
 
 class EasternTime(tzinfo):
@@ -104,3 +115,193 @@ def _easter(year: int) -> date:
     m = (a + 11 * h + 22 * l) // 451
     month = (h + l - 7 * m + 114) // 31
     return date(year, month, (h + l - 7 * m + 114) % 31 + 1)
+
+
+# --------------------------------------------------------------------------
+# Phase 11 checkpoint 1 - trading windows and the submission gate
+# --------------------------------------------------------------------------
+
+
+class AssetClass:
+    """Asset classes the platform can currently route an order for.
+
+    The shipped universe is US equities, so that is the only class with a
+    trading calendar today. An unknown class is a *fail-closed* answer at the
+    gate, never an assumed window.
+    """
+
+    US_EQUITY = "US_EQUITY"
+
+
+SUPPORTED_ASSET_CLASSES: frozenset[str] = frozenset({AssetClass.US_EQUITY})
+
+#: Machine-readable gate outcomes. ``SESSION_OK`` is the only value that
+#: allows a submission; every other code refuses it with its own reason.
+SESSION_OK = "SESSION_OK"
+MARKET_CLOSED = "MARKET_CLOSED"
+OUTSIDE_ALLOWED_WINDOW = "OUTSIDE_ALLOWED_WINDOW"
+EXTENDED_HOURS_UNSUPPORTED = "EXTENDED_HOURS_UNSUPPORTED"
+UNKNOWN_ASSET_CLASS = "UNKNOWN_ASSET_CLASS"
+
+#: Submission policies. ``regular`` (the default) accepts orders only during
+#: the regular session. ``extended`` additionally accepts them during the
+#: extended window below, and only when the connected execution provider
+#: reports extended-hours capability. Neither policy ever accepts an order on
+#: a non-trading day.
+SESSION_POLICIES: tuple[str, ...] = ("regular", "extended")
+DEFAULT_SESSION_POLICY = "regular"
+
+#: Platform submission policy for extended hours, in exchange local time.
+#: This is this platform's own configured window - not a claim about any
+#: venue's schedule. A provider that does not support extended hours is
+#: refused regardless of this window.
+EXTENDED_OPEN = time(4, 0)
+EXTENDED_CLOSE = time(20, 0)
+
+SESSION_LABELS = {
+    "PRE_MARKET": "pre-market",
+    "REGULAR": "regular session",
+    "AFTER_HOURS": "after-hours",
+    "CLOSED": "closed",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDecision:
+    """The answer to "may an order be submitted at this moment?"."""
+
+    allowed: bool
+    code: str
+    state: str
+    is_trading_day: bool
+    trading_date: date
+    at: datetime
+    policy: str
+    asset_class: str
+    reason: str
+
+    @property
+    def exchange_local_time(self) -> time:
+        return self.at.timetz().replace(tzinfo=None)
+
+
+def normalize_session_policy(value: str | None) -> str:
+    """Validate a configured submission policy; anything else fails startup."""
+    policy = (value or "").strip().lower()
+    if not policy:
+        return DEFAULT_SESSION_POLICY
+    if policy not in SESSION_POLICIES:
+        raise ValueError(
+            f"MARKET_SESSION_SUBMISSION must be one of {SESSION_POLICIES}, "
+            f"received {value!r}")
+    return policy
+
+
+def asset_class_for_symbol(symbol: str) -> str:
+    """Asset class for a tradable symbol.
+
+    The platform's universe and exchange capability are US equities, so every
+    symbol resolves to :class:`AssetClass.US_EQUITY`. New asset classes must
+    extend this map *and* add a calendar before they can pass the gate -
+    they are never assumed tradeable.
+    """
+    return AssetClass.US_EQUITY
+
+
+def session_gate(at: datetime | None = None,
+                 *,
+                 policy: str = DEFAULT_SESSION_POLICY,
+                 provider_extended_hours: bool = True,
+                 asset_class: str = AssetClass.US_EQUITY) -> SessionDecision:
+    """Decide whether an order may be submitted at ``at``.
+
+    Enforcement order, most fundamental first:
+
+    1. an unknown asset class has no calendar, so it is refused
+       (``UNKNOWN_ASSET_CLASS``);
+    2. a weekend or market holiday is refused for every policy
+       (``MARKET_CLOSED``);
+    3. inside the regular session the order is allowed (``SESSION_OK``);
+    4. outside it the ``regular`` policy refuses
+       (``OUTSIDE_ALLOWED_WINDOW``), while the ``extended`` policy checks the
+       provider's declared extended-hours capability
+       (``EXTENDED_HOURS_UNSUPPORTED``) and then this platform's extended
+       window (``OUTSIDE_ALLOWED_WINDOW``).
+
+    A naive ``at`` is interpreted as UTC so a caller without a clock cannot
+    silently inherit the host machine's local zone.
+    """
+    normalized_policy = normalize_session_policy(policy)
+    if asset_class not in SUPPORTED_ASSET_CLASSES:
+        return SessionDecision(
+            False, UNKNOWN_ASSET_CLASS, "UNKNOWN", False,
+            (at or datetime.now(timezone.utc)).astimezone(NEW_YORK).date(),
+            _aware(at), normalized_policy, asset_class,
+            f"no market calendar is defined for asset class {asset_class!r}; "
+            f"orders are refused until one is")
+    moment = _aware(at)
+    session = market_session(moment)
+    local = moment.astimezone(NEW_YORK)
+    window = f"{session.regular_open.strftime('%H:%M')}-{session.regular_close.strftime('%H:%M')} {NEW_YORK.tzname(session.regular_open)}"
+    label = SESSION_LABELS.get(session.state, session.state)
+
+    if not session.is_trading_day:
+        resumes = _next_trading_day(session.trading_date)
+        return SessionDecision(
+            False, MARKET_CLOSED, "CLOSED", False, session.trading_date, local,
+            normalized_policy, asset_class,
+            f"US equity market is closed on {session.trading_date.isoformat()}; "
+            f"the next regular session is {resumes.isoformat()} 09:30 "
+            f"{NEW_YORK.tzname(session.regular_open)}")
+
+    if session.state == "REGULAR":
+        return SessionDecision(
+            True, SESSION_OK, session.state, True, session.trading_date, local,
+            normalized_policy, asset_class,
+            f"the {label} is open ({window})")
+
+    # PRE_MARKET or AFTER_HOURS on a trading day.
+    if normalized_policy != "extended":
+        return SessionDecision(
+            False, OUTSIDE_ALLOWED_WINDOW, session.state, True,
+            session.trading_date, local, normalized_policy, asset_class,
+            f"orders are accepted only during the regular session ({window}); "
+            f"it is {local.strftime('%H:%M')} {label} on "
+            f"{session.trading_date.isoformat()}")
+    if not provider_extended_hours:
+        return SessionDecision(
+            False, EXTENDED_HOURS_UNSUPPORTED, session.state, True,
+            session.trading_date, local, normalized_policy, asset_class,
+            f"the connected execution provider does not support extended-hours "
+            f"orders; it is {local.strftime('%H:%M')} {label} on "
+            f"{session.trading_date.isoformat()}")
+    if not (EXTENDED_OPEN <= local.time().replace(tzinfo=None) < EXTENDED_CLOSE):
+        return SessionDecision(
+            False, OUTSIDE_ALLOWED_WINDOW, session.state, True,
+            session.trading_date, local, normalized_policy, asset_class,
+            f"outside the extended-hours submission window "
+            f"{EXTENDED_OPEN.strftime('%H:%M')}-{EXTENDED_CLOSE.strftime('%H:%M')} "
+            f"{NEW_YORK.tzname(session.regular_open)}: it is "
+            f"{local.strftime('%H:%M')} {label} on "
+            f"{session.trading_date.isoformat()}")
+    return SessionDecision(
+        True, SESSION_OK, session.state, True, session.trading_date, local,
+        normalized_policy, asset_class,
+        f"{label} submission is allowed by the {normalized_policy!r} policy and "
+        f"the provider supports extended hours")
+
+
+def _aware(at: datetime | None) -> datetime:
+    moment = at if at is not None else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(NEW_YORK)
+
+
+def _next_trading_day(day: date, limit: int = 10) -> date:
+    candidate = day + timedelta(days=1)
+    for _ in range(limit):
+        if candidate.weekday() < 5 and candidate not in _holidays(candidate.year):
+            return candidate
+        candidate += timedelta(days=1)
+    return candidate

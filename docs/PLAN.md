@@ -59,6 +59,24 @@
 > refusal and emptied position list, the durable fill journal exported, and no credential in
 > any response body). Committed as `0ddaf27` (sizing units), `de4585c` (signal desk and
 > frontend tests), `0762fa2` (checkpoint 4), `39b4831` (checkpoint 5), `12b825e` (checkpoint 6).**
+> **Phase 11 checkpoint 1 (the trading-window gate) is implemented and verified — `583 passed,
+> 203 subtests`, run with the exchange **closed** (20:16 UTC, after-hours), so no test can depend
+> on the host clock's market hours; two fixtures that submitted through the engine's default real
+> clock (`test_paper_trading.py`, `test_orchestrator.py`) were made deterministic. The new
+> `backend/tests/test_market_sessions.py` holds the calendar boundaries, both submission
+> policies, the pipeline's `SESSION_BLOCKED` refusal with no order created, the legal retry once
+> the exchange reopens, the webhook's `422 SESSION_CLOSED` contract, and the configuration
+> plumbing); `tsc --noEmit` clean; `npm run build` succeeds; frontend tests
+> `9 passed, 1 skipped` (the live-API test skips without a running backend); the committed HTTP
+> smoke passed with 58 checks on its frozen in-session clock. New order submissions are now
+> refused outside the allowed session by `session_gate` in `backend/market_data/session.py`
+> (weekend, market holiday, early close, regular-session boundary, DST, and the provider's
+> extended-hours capability); the refusal is `SESSION_BLOCKED` in the ledger and `422
+> SESSION_CLOSED` on the webhook, creates no order, and is never remembered, so the same alert
+> is accepted in the next regular session. Phase 10 exits and owner closes stay ungated — they
+> are paper-ledger position actions, not venue orders. The already-running backend (8000), demo
+> backend (8001) and vite dev server (5173) predate these changes and need a controlled restart
+> before the new status fields can be verified in a browser. Detail: `docs/PIPELINE.md`.**
 
 ---
 
@@ -278,7 +296,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 8 | Risk Hardening | **DONE** (committed: `c8420ab`) |
 | 9 | Order Lifecycle Management & Reconciliation | **DONE** (committed: `Complete phase 9 order lifecycle and reconciliation`) |
 | 10 | First-Class Position Management | pending |
-| 11 | Market-Session / Market-Hours Handling | pending |
+| 11 | Market-Session / Market-Hours Handling | **IN PROGRESS** (checkpoint 1 done) |
 | 12 | Autonomous Decision Engine | pending |
 | 13 | Strategy Evaluation & Anti-Overfitting Validation | pending |
 | 14 | Backtesting Product Quality | pending |
@@ -695,6 +713,21 @@ as done when its acceptance criteria and regression tests pass.
 - Market-session awareness (pre/open/after/close/holiday), trading-window enforcement per asset
   class and per provider capability, no order submission outside allowed sessions, session-aware
   scanning and valuation staleness.
+- **Checkpoint 1 — the trading-window gate (DONE).** One calendar
+  (`backend/market_data/session.py`: `market_session` + `session_gate`) answers "may an order be
+  submitted right now?" as a machine-readable decision. A `regular` (default) policy accepts the
+  regular session only; an `extended` policy (`MARKET_SESSION_SUBMISSION=extended`) also accepts
+  pre/after-hours inside this platform's documented 04:00–20:00 exchange-local window and only
+  when the provider declares `extended_hours`. Both refuse weekends, market holidays (including
+  observed shifts and early closes), DST-inconsistent instants, and unknown asset classes.
+  Enforcement is pipeline step 7b: `SESSION_BLOCKED`, journaled, no order created, retried
+  legally next session; the webhook answers `422 SESSION_CLOSED` and never remembers the signal.
+  `GET /api/status` reports `market_session_policy` and `market_session_orders_allowed`.
+  Verified by `backend/tests/test_market_sessions.py` and the committed smoke suite.
+- **Checkpoint 2 — session-aware scanning and valuation staleness (pending).** The orchestrator
+  must not evaluate entry candidates outside the configured session, and a valuation older than
+  its staleness window must be reported as stale instead of priced; both must be observable in
+  `/api/status` and journaled without inventing quotes.
 
 ### PHASE 12 — Autonomous Decision Engine
 - Continuously scan/analyze real market data, identify valid opportunities, run strategy

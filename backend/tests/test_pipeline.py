@@ -399,6 +399,7 @@ class RejectionCodeTests(unittest.TestCase):
             PipelineCode.PROVIDER_RATE_LIMIT,
             PipelineCode.PROVIDER_EXECUTION_REJECTION,
             PipelineCode.PROVIDER_ID_COLLISION,
+            PipelineCode.SESSION_BLOCKED,
         }
         self.assertEqual(set(ALL_CODES), exercised)
 

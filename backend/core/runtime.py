@@ -20,7 +20,7 @@ from backend.execution import (
     AdapterRegistry, ExecutionMode, ExecutionRouter, ExecutionSafetyGate, LocalPaperAdapter,
 )
 from backend.market_data import MarketDataBridge, MarketDataService, build_market_data_provider
-from backend.market_data.session import NEW_YORK, market_session
+from backend.market_data.session import NEW_YORK, AssetClass, market_session, session_gate
 from backend.orders.provider import snapshot_from_adapter
 from backend.orchestrator import OrchestratorConfig, TradingOrchestrator
 from backend.paper_trading import PaperTradingEngine, PositionValuationService, reconcile_journal
@@ -97,7 +97,8 @@ class ApplicationRuntime:
         self.paper = PaperTradingEngine(self.risk, self.portfolio,
                                         journal=self.repository, clock=self.clock,
                                         connection_manager=self.connection_manager,
-                                        connection_id="paper")
+                                        connection_id="paper",
+                                        session_submission=trading.session_submission)
         self.valuation = PositionValuationService(
             self.market_data_bridge, self.portfolio, self.paper, journal=self.repository)
         self.reconciliation = reconcile_journal(
@@ -284,6 +285,24 @@ class ApplicationRuntime:
                                            now=self.clock())
         return report.to_dict()
 
+    def _market_session_allows_orders(self) -> bool:
+        """Whether the session gate would accept a submission right now.
+
+        This is the same decision the pipeline enforces (Phase 11), recomputed
+        for display only: the calendar and the configured policy decide, and
+        the provider's extended-hours capability is read fail-closed, so the
+        status can never claim "allowed" for a provider that would refuse.
+        """
+        try:
+            extended = bool(getattr(self.execution.capabilities(), "extended_hours",
+                                    False))
+        except Exception:  # noqa: BLE001 - status must not fail on a provider
+            extended = False
+        return session_gate(
+            self.clock(), policy=self.config.trading.session_submission,
+            provider_extended_hours=extended,
+            asset_class=AssetClass.US_EQUITY).allowed
+
     def refresh_market(self, symbols=None):
         """Fetch real quotes, mark open positions, and evaluate automatic exits."""
         if symbols is None:
@@ -317,6 +336,8 @@ class ApplicationRuntime:
             "readiness": self.connections.readiness()["status"],
             "market_session": market_session(self.clock()).state,
             "market_trading_day": market_session(self.clock()).is_trading_day,
+            "market_session_policy": self.config.trading.session_submission,
+            "market_session_orders_allowed": self._market_session_allows_orders(),
             "report_notification": "local-only",
             "owner_controls_enabled": self.owner_controls is not None,
             "orchestrator": state, "portfolio": snapshot,

@@ -51,19 +51,23 @@ class PaperTradingEngine:
                  journal: JournalRepository | None = None,
                  *, clock=None,
                  connection_manager: ConnectionManager | None = None,
-                 connection_id: str = "paper"):
+                 connection_id: str = "paper",
+                 session_submission: str = "regular"):
         self.risk_engine = risk_engine
         self.portfolio = portfolio
         self.config = config or PaperTradingConfig()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.connection_id = str(connection_id or "paper")
+        #: Phase 11: the market-session policy handed to the pipeline.
+        self.session_submission = session_submission
         self._execution = execution
         self.connections = (connection_manager if connection_manager is not None
                             else self._own_connections(
                                 execution or LocalPaperAdapter(cash=portfolio.cash)))
         self.pipeline = TradingPipeline(
             connections=self.connections, risk_engine=risk_engine, portfolio=portfolio,
-            journal=journal, clock=self.clock, connection_id=self.connection_id)
+            journal=journal, clock=self.clock, connection_id=self.connection_id,
+            session_submission=session_submission)
         self._journal = journal
         self._records: dict[str, PaperTradeRecord] = {}
         self._setups: dict[str, TradeSetup] = {}

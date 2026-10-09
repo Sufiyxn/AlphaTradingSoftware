@@ -256,6 +256,14 @@ class TradingViewWebhookService:
                 422, "RISK_REJECTED",
                 "the signal was rejected by the risk engine",
                 remember=True, reasons=list(result.risk.reasons))
+        if result.code == PipelineCode.SESSION_BLOCKED:
+            # Phase 11: refused by the market-session calendar, not by the
+            # signal itself. Never remembered: the same alert is legitimate
+            # again in the next regular session.
+            raise WebhookError(
+                422, "SESSION_CLOSED",
+                result.reason or "the market session does not allow new orders",
+                reason="SESSION_BLOCKED")
         if not result.accepted or result.trade is None:
             order = result.order
             detail = f"{order.status.value}" if order is not None else (
