@@ -42,9 +42,8 @@
 > `/api/orders/reconcile` expose it. Verification: `467 passed, 150 subtests`. Full detail:
 > `docs/ORDERS.md`.*
 > **Phase 10 checkpoints are complete: checkpoint 1 (durable provider-order identity) is
-> implemented and
-> verified — `486 passed, 150 subtests`; checkpoint 2 (durable fill identity + a durable fill
-> journal) is implemented and verified — `509 passed, 150 subtests`; checkpoint 3 (positions are
+> implemented and verified — `486 passed, 150 subtests`; checkpoint 2 (durable fill identity + a
+> durable fill journal) is implemented and verified — `509 passed, 150 subtests`; checkpoint 3 (positions are
 > booked from durable fills, exactly once) is implemented and verified — `523 passed, 150
 > subtests`; checkpoint 4 (owner-authorized exit as a first-class path) is implemented and
 > verified — `536 passed, 164 subtests`; checkpoint 5 (a partial exit that scales a position
@@ -58,7 +57,8 @@
 > with its token guard, refused loosening and moved levels, the owner close with its token
 > guard, refused price, refused over-close, partial close with its remainder, second-close
 > refusal and emptied position list, the durable fill journal exported, and no credential in
-> any response body).**
+> any response body). Committed as `0ddaf27` (sizing units), `de4585c` (signal desk and
+> frontend tests), `0762fa2` (checkpoint 4), `39b4831` (checkpoint 5), `12b825e` (checkpoint 6).**
 
 ---
 
