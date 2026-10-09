@@ -41,21 +41,24 @@
 > rebuilt after a restart; `GET /api/orders` and owner-guarded `POST /api/orders/cancel`,
 > `/api/orders/reconcile` expose it. Verification: `467 passed, 150 subtests`. Full detail:
 > `docs/ORDERS.md`.*
-> **Phase 10 has started: checkpoint 1 (durable provider-order identity) is implemented and
+> **Phase 10 checkpoints are complete: checkpoint 1 (durable provider-order identity) is
+> implemented and
 > verified — `486 passed, 150 subtests`; checkpoint 2 (durable fill identity + a durable fill
 > journal) is implemented and verified — `509 passed, 150 subtests`; checkpoint 3 (positions are
 > booked from durable fills, exactly once) is implemented and verified — `523 passed, 150
 > subtests`; checkpoint 4 (owner-authorized exit as a first-class path) is implemented and
 > verified — `536 passed, 164 subtests`; checkpoint 5 (a partial exit that scales a position
-> out) is implemented and verified — `545 passed, 177 subtests`; `tsc --noEmit` clean; `npm run
-> build` succeeds; HTTP smoke passed with 53 checks and is now committed as
+> out) is implemented and verified — `545 passed, 177 subtests`; checkpoint 6 (stop/target
+> adjustment, risk changes on an open position) is implemented and verified — `558 passed, 191
+> subtests`; all six checkpoints of the phase's sequence are complete. `tsc --noEmit` clean;
+> `npm run build` succeeds; HTTP smoke passed with 58 checks and is now committed as
 > `scripts/http_smoke.py` (the four documented endpoints parsed as JSON, a signed paper trade
 > whose order, fill, position, risk decision and activity rows are all served over HTTP, replay
-> and missing-authentication refusals, owner-token guards, read-only reconcile, the owner close
-> with its token guard, refused price, refused over-close, partial close with its remainder,
-> second-close refusal and emptied position list, the durable fill journal exported, and no
-> credential in any response body) — checkpoint 6 (stop/target adjustment) is defined below and
-> has not started.**
+> and missing-authentication refusals, owner-token guards, read-only reconcile, the risk change
+> with its token guard, refused loosening and moved levels, the owner close with its token
+> guard, refused price, refused over-close, partial close with its remainder, second-close
+> refusal and emptied position list, the durable fill journal exported, and no credential in
+> any response body).**
 
 ---
 
@@ -596,13 +599,13 @@ Delivered scope (as approved):
   order/fill reconciliation against the execution provider and the local journal; drift
   detection and honest unresolved states; restart recovery.
 
-### PHASE 10 — First-Class Position Management
+### PHASE 10 — First-Class Position Management — DONE (CP1–CP6 complete; `558 passed, 191 subtests`)
 - Position management as a **first-class subsystem**, not a side effect of order execution:
   entry → open position → monitoring → risk changes → exit conditions → close → reconciliation →
   final P&L; dynamic position management; scaling/adjustment where supported; positions remain
   `UNPRICED` until a fresh real mark exists.
 
-#### Phase 10 checkpoints 4–6 (CP1–CP5 complete; CP6 defined below, not started)
+#### Phase 10 checkpoints 4–6 (CP1–CP6 complete)
 
 Checkpoints 1–3 made *entry* deterministic: provider-order identity, durable fill identity, and
 positions booked from durable fills, exactly once. Reading the phase's own remaining words —
@@ -680,6 +683,13 @@ as done when its acceptance criteria and regression tests pass.
   stop, HTTP status mapping).
 - *Depends on:* CP3; sequenced after CP4/CP5 because it changes the same levels those
   checkpoints read, and it must not alter how a close accounts for a fill.
+- *Status:* **DONE** — `PaperTradingEngine.adjust_risk()` (fail-closed rules: `RISK_NOT_REDUCING`,
+  `STOP_THROUGH_ENTRY`, `TARGET_NOT_BEYOND_ENTRY`, `REWARD_RISK_TOO_LOW` against
+  `risk_engine.config.min_reward_risk`, `INVALID_PRICE`, `INVALID_PAYLOAD`, `POSITION_NOT_FOUND`,
+  `RISK_UNAVAILABLE`) + owner-guarded `POST /api/positions/risk`, persisted by
+  `record_trade_risk()` on the `trades` row with the approved entry setup left as audit;
+  verified `558 passed, 191 subtests` (13 tests in the new `backend/tests/test_position_risk.py`)
+  and `58/58` HTTP-smoke checks.
 
 ### PHASE 11 — Market-Session / Market-Hours Handling
 - Market-session awareness (pre/open/after/close/holiday), trading-window enforcement per asset

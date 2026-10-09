@@ -483,6 +483,92 @@ class PaperTradingEngine:
             self._forget(order_id)
         return pnl
 
+    def adjust_risk(self, symbol: str, *, stop_price=None, target_price=None,
+                    timestamp: datetime | None = None) -> dict:
+        """Move the stop and/or target of an open paper position (phase 10 CP6).
+
+        Fail-closed by design: only a **risk-reducing** stop move is accepted,
+        the new stop must stay on the losing side of entry, the target beyond
+        entry, and the resulting reward:risk must keep the configured floor.
+        Both prices are explicit and finite - nothing is derived or defaulted -
+        and the new levels are written into the same trade records the
+        automatic exit reads, so they take effect immediately and after a
+        restart. Entry price, quantity and fills are never touched.
+        """
+        name = str(symbol or "").strip().upper()
+        position = next((item for item in self.portfolio.positions
+                         if item.symbol == name), None)
+        if position is None:
+            return {"changed": False, "code": "POSITION_NOT_FOUND",
+                    "error": f"no open position exists for {name}"}
+        if stop_price is None and target_price is None:
+            return {"changed": False, "code": "INVALID_PAYLOAD",
+                    "error": "a stop_price or target_price is required"}
+        for label, value in (("stop_price", stop_price),
+                             ("target_price", target_price)):
+            if value is None:
+                continue
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0):
+                return {"changed": False, "code": "INVALID_PRICE",
+                        "error": f"{label} must be a positive finite number"}
+        records = [(order_id, record) for order_id, record in self._records.items()
+                   if record.symbol == name]
+        if not records:
+            return {"changed": False, "code": "RISK_UNAVAILABLE",
+                    "error": f"no open trade record to adjust for {name}"}
+        sign = 1 if position.direction is Direction.LONG else -1
+        entry = float(position.average_entry_price)
+        floor = float(self.risk_engine.config.min_reward_risk)
+        old_stop = float(records[0][1].stop_price)
+        old_target = float(records[0][1].target_price)
+        new_stop = float(stop_price) if stop_price is not None else old_stop
+        new_target = float(target_price) if target_price is not None else old_target
+
+        for _order_id, record in records:
+            if stop_price is not None:
+                current = float(record.stop_price)
+                if (sign > 0 and new_stop <= current) or (sign < 0 and new_stop >= current):
+                    return {"changed": False, "code": "RISK_NOT_REDUCING",
+                            "error": "only a risk-reducing stop move is accepted"}
+            risk = (entry - new_stop) * sign
+            if risk <= 0:
+                return {"changed": False, "code": "STOP_THROUGH_ENTRY",
+                        "error": "the stop must stay on the losing side of entry "
+                                 "so risk per unit stays above zero"}
+            reward = (new_target - entry) * sign
+            if reward <= 0:
+                return {"changed": False, "code": "TARGET_NOT_BEYOND_ENTRY",
+                        "error": "the target must stay beyond entry"}
+            if reward / risk < floor:
+                return {"changed": False, "code": "REWARD_RISK_TOO_LOW",
+                        "error": (f"reward:risk {reward / risk:.4g} is below the "
+                                  f"{floor:g}:1 floor")}
+
+        changed_at = timestamp or self.clock()
+        for order_id, record in records:
+            self._records[order_id] = replace(record, stop_price=new_stop,
+                                              target_price=new_target)
+            self._journal_call("record_trade_risk", order_id,
+                               stop_price=new_stop, target_price=new_target)
+        risk = (entry - new_stop) * sign
+        reward = (new_target - entry) * sign
+        self._journal_call(
+            "record_position_event", changed_at, name, "RISK_CHANGED",
+            {"order_ids": [order_id for order_id, _ in records],
+             "direction": position.direction.value, "entry_price": entry,
+             "quantity": position.quantity,
+             "stop_price": {"old": old_stop, "new": new_stop},
+             "target_price": {"old": old_target, "new": new_target},
+             "reward_risk_ratio": reward / risk, "reason": "OWNER_ADJUSTMENT"})
+        return {"changed": True, "symbol": name,
+                "direction": position.direction.value, "entry_price": entry,
+                "quantity": position.quantity,
+                "stop_price": {"old": old_stop, "new": new_stop},
+                "target_price": {"old": old_target, "new": new_target},
+                "reward_risk_ratio": reward / risk, "execution": "PAPER",
+                "reason": "OWNER_ADJUSTMENT"}
+
     def _forget(self, order_id: str) -> None:
         """Drop every per-order booking memory once the trade is closed."""
         self._records.pop(order_id, None)

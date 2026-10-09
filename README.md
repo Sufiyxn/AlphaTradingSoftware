@@ -50,7 +50,7 @@ A fresh clone with an empty `.env` boots **fully disconnected**: no market data 
 - `GET /api/opportunities`, `/api/quotes`, `/api/positions`, `/api/trades`
 - `GET /api/performance`, `/api/reports`, `/api/logs`, `/api/orders`
 - Authenticated `POST /api/control/start`, `/stop`, `/pause`, `/resume`, `/emergency-stop`, `/reset-emergency-stop`, `/terminate`, `/configuration`
-- Authenticated `POST /api/orders/cancel`, `/api/orders/reconcile`, `/api/positions/close`
+- Authenticated `POST /api/orders/cancel`, `/api/orders/reconcile`, `/api/positions/close`, `/api/positions/risk`
 - `POST /api/webhooks/tradingview` (its own shared secret, no owner token required)
 
 Reports can be generated on demand and are also written by a local scheduler after the US regular session. The current notifier is an in-process local sink; it does not send email, SMS, or third-party messages. `GET /api/logs` supports `kind`, `format=json|csv`, inclusive `start`/`end` dates, and `symbol` filters.

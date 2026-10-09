@@ -293,6 +293,18 @@ recovers open orders after a restart.
   an automatic or signal exit. An optional `quantity` scales the exit down to a **partial
   close**: the remainder keeps its entry price, `partial: true` with `remaining` reports how
   much is left, and omitting `quantity` closes everything exactly as before.
+- `POST /api/positions/risk` with `{"symbol": "AAPL", "stop_price": 49.5, "target_price": 55}`
+  (owner token) — `200` `{changed: true, symbol, direction, entry_price, quantity,
+  stop_price: {old, new}, target_price: {old, new}, reward_risk_ratio, execution: "PAPER",
+  reason: "OWNER_ADJUSTMENT"}`; `400` `INVALID_PAYLOAD` when neither level is sent, `400`
+  `INVALID_PRICE` for a non-positive or non-finite value, `400` `RISK_NOT_REDUCING` unless a
+  stop move tightens it (long: strictly higher; short: strictly lower), `400`
+  `STOP_THROUGH_ENTRY` / `TARGET_NOT_BEYOND_ENTRY` when a level crosses entry, `400`
+  `REWARD_RISK_TOO_LOW` below the configured 2:1 floor, `404` `POSITION_NOT_FOUND` when
+  nothing is open for that symbol, `503` when owner controls are disabled. Only the two
+  levels move — entry price, quantity and fills are untouched — exactly one `RISK_CHANGED`
+  position event carries old and new values, and the adjusted levels are what the automatic
+  exit uses immediately and after a restart.
 
 `describe()` is the JSON-ready, secret-free view used by the API and the audit trail.
 
@@ -376,3 +388,14 @@ the whole trade once the last unit leaves, with P&L covering every step), one
 the partials booked, the daily P&L and the close-operation count.
 
 Verification (Phase 10 checkpoint 5): `545 passed, 177 subtests`; HTTP smoke `53/53 checks`.
+
+`backend/tests/test_position_risk.py` (13 tests, 14 subtests) holds Phase 10 checkpoint 6: a
+tightened stop and moved target journaled with exactly one `RISK_CHANGED` event carrying old
+and new values, entry/quantity/fills/setup proven untouched, every refusal refused with state
+and journal unchanged (loosened or repeated stop, stop through entry, target that breaks the
+2:1 floor, target on the entry side, impossible prices, empty payload, unknown symbol), the
+new stop firing the automatic exit at a price the old stop would have ignored (with the
+control proving the old stop would not), the same levels restoring and firing after a
+restart, and the HTTP status mapping with no credential in the response.
+
+Verification (Phase 10 checkpoint 6): `558 passed, 191 subtests`; HTTP smoke `58/58 checks`.

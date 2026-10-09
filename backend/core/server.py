@@ -189,6 +189,14 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     status = 200 if outcome.get("closed") else (
                         404 if outcome.get("code") == "POSITION_NOT_FOUND" else 400)
                     return self._send(status, outcome)
+                if parsed.path == "/api/positions/risk":
+                    controls.authorize_owner(token)
+                    outcome = runtime.change_position_risk(
+                        body.get("symbol"), body.get("stop_price"),
+                        body.get("target_price"))
+                    status = 200 if outcome.get("changed") else (
+                        404 if outcome.get("code") == "POSITION_NOT_FOUND" else 400)
+                    return self._send(status, outcome)
                 actions = {
                     "/api/control/start": lambda: controls.start(token),
                     "/api/control/stop": lambda: controls.stop(token),

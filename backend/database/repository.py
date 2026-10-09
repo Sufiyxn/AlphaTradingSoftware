@@ -193,6 +193,18 @@ class SQLiteJournalRepository:
         self._execute("UPDATE trades SET quantity=?, context_json=? WHERE trade_id=?",
                       (held - quantity, to_json(details), order_id))
 
+    def record_trade_risk(self, order_id: str, *, stop_price: float,
+                          target_price: float) -> None:
+        """Persist moved stop/target levels for one open trade (phase 10 CP6).
+
+        Only the two levels move: entry price, quantity, fills and the
+        approved entry setup in `context_json` are left exactly as the trade
+        recorded them, and the row stays open (`exit_timestamp` untouched) so a
+        restart restores the new levels instead of the original ones.
+        """
+        self._execute("UPDATE trades SET stop_price=?, target_price=? WHERE trade_id=?",
+                      (stop_price, target_price, order_id))
+
     def record_ai_analysis(self, analysis: Any) -> None:
         self._insert("ai_analyses", (analysis.timestamp.isoformat(), analysis.symbol.strip().upper(),
                     analysis.recommendation.value, analysis.score, to_json(analysis)))

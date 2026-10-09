@@ -251,6 +251,20 @@ class ApplicationRuntime:
                 "realized_pnl": realized, "reason": "MANUAL",
                 "execution": "PAPER"}
 
+    def change_position_risk(self, symbol, stop_price=None,
+                             target_price=None) -> dict:
+        """Owner-authorized stop/target adjustment on one open position.
+
+        Runs under the submission lock like a close, and hands every rule -
+        risk-reducing only, stop on the losing side of entry, target beyond
+        entry, configured reward:risk floor - to the paper engine, which also
+        owns the records the automatic exit reads.
+        """
+        with self.paper.pipeline.submission_lock:
+            return self.paper.adjust_risk(symbol, stop_price=stop_price,
+                                          target_price=target_price,
+                                          timestamp=self.clock())
+
     def reconcile_orders(self) -> dict:
         """Compare the journal with the execution provider, read-only."""
         connection_id = self.paper.connection_id

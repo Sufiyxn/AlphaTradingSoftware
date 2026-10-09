@@ -261,6 +261,47 @@ def main() -> int:
         smoke.check("read-only reconcile reports MATCH",
                     reconcile[0] == 200 and reconcile[1].get("status") == "MATCH")
 
+        # Phase 10 checkpoint 6: the owner can move the stop and target of the
+        # open position - but only in the risk-reducing direction.
+        unguarded_risk = smoke.post(
+            "/api/positions/risk",
+            json.dumps({"symbol": "AAPL", "stop_price": 49.5}).encode("utf-8"),
+            {"Content-Type": "application/json"})
+        smoke.check("a risk change requires the owner token",
+                    unguarded_risk[0] == 401)
+        loosened = smoke.post(
+            "/api/positions/risk",
+            json.dumps({"symbol": "AAPL", "stop_price": 47.0}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("a loosened stop is refused",
+                    loosened[0] == 400
+                    and loosened[1].get("code") == "RISK_NOT_REDUCING",
+                    f"{loosened[0]} {loosened[1].get('code')}")
+        tightened = smoke.post(
+            "/api/positions/risk",
+            json.dumps({"symbol": "AAPL", "stop_price": 49.5,
+                        "target_price": 55.0}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("a tightened stop and target are accepted",
+                    tightened[0] == 200 and tightened[1].get("changed") is True
+                    and tightened[1].get("stop_price", {}).get("new") == 49.5
+                    and tightened[1].get("execution") == "PAPER",
+                    f"{tightened[0]} {tightened[1].get('code')}")
+        _, risk_positions = smoke.get("/api/positions")
+        moved = risk_positions.get("positions") or []
+        smoke.check("the moved levels are what the positions API serves",
+                    len(moved) == 1 and moved[0].get("stop_price") == 49.5
+                    and moved[0].get("target_price") == 55.0
+                    and moved[0].get("quantity") == 5,
+                    str([(item.get("stop_price"), item.get("target_price"))
+                         for item in moved]))
+        unknown_risk = smoke.post(
+            "/api/positions/risk",
+            json.dumps({"symbol": "MSFT", "stop_price": 49.5}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("a risk change for an unheld symbol is not found",
+                    unknown_risk[0] == 404, str(unknown_risk[0]))
+
         # Phase 10 checkpoint 4: the owner can close the paper position the
         # signal opened, without a signal source and without a fabricated price.
         unguarded_close = smoke.post(
