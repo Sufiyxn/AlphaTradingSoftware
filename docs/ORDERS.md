@@ -104,6 +104,38 @@ Every fill is given exactly one durable identity before it is merged, journaled,
   that is not durable is never visible in the order, in the API, or in the `orders` row a
   restart rebuilds from.
 
+### Positions are booked from durable fills (Phase 10 checkpoint 3)
+
+A position exists because executions happened, not because the pipeline said a word. Checkpoint 2
+made fills durable; this checkpoint makes them the only thing that moves a position.
+
+- The order lifecycle **announces** fills through `OrderLifecycleService.fill_observer`
+  (`backend/orders/service.py`), called exactly once per fill with only the fills that became
+  durable *for the first time* in that call — new to the order and new to the journal. A replay
+  never reaches the observer, and a journal that cannot store fills stores nothing to replay
+  against. Without a journal nothing is announced, and the paper engine still books from the
+  order's own fills, because a missing journal is "no durable record", not "no execution".
+- `PaperTradingEngine._on_durable_fills` is the only booking path. The first announcement for an
+  order opens the trade on the setup the submission was risk-approved with; later announcements
+  add to the open position. An order with no setup, a rejected order, and an order that never
+  executed still open nothing: a position is never invented.
+- Booking is keyed by `fill_id` (`_booked_fills`) and gated on the journal's insert-versus-replay
+  answer together, so a late or partial execution books once — before a restart, and after one
+  (`restore_trade` seeds the set from the fills the restored order already carries).
+- The trade row follows the position: its `quantity` and `entry_price` are rewritten to what the
+  position now holds, because `reconcile_journal` rebuilds cash as
+  `starting_cash − Σ(open quantity × entry price) + Σ(closed pnl)`. Leaving the original entry
+  price behind would drift the ledger on restart by exactly the later fills' cost.
+- Fills the journal holds that no trade accounts for are reported at restart as
+  `RECONCILIATION_DISCREPANCY` (`DURABLE_FILL_WITHOUT_TRADE` for an order with fills but no trade
+  row, `DURABLE_FILL_WITHOUT_ORDER` for a fill whose order the journal cannot reconstruct) and
+  are never turned into a position — divergence is surfaced, not papered over. The same
+  disagreement seen live — a fill already durable that the order had never seen — is reported as
+  `DURABLE_FILL_UNKNOWN_TO_ORDER`, and the order adopts the execution without re-announcing it.
+- A durable fill row carries where it came from: `context_json` holds `order_id`, `side`, the
+  order's `source` (which path created it) and its `signal_id` when there was one, so executions
+  can be read from `/api/logs?kind=fills` alone.
+
 ## Open orders reserve risk capacity
 
 An order that has been submitted but not (fully) filled commits capital the moment it fills, so
@@ -293,3 +325,18 @@ cancellation never becoming visible in the order, in the API, or in the row a re
 from.
 
 Verification (Phase 10 checkpoint 2): `509 passed, 150 subtests`.
+
+`backend/tests/test_position_fills.py` (10 tests) holds Phase 10 checkpoint 3: a fill reported
+after acceptance reaching the position and the trade record, replays booking nothing, an
+order accepted without a fill opening its position when it fills, the initial submission
+booking exactly once, the observer announcing only new-and-durable fills (with a
+`DURABLE_FILL_UNKNOWN_TO_ORDER` report when the journal already held one), restart rebuilding
+cash and quantity the fills describe with a post-restart replay booking nothing, a durable fill
+no trade accounts for being reported instead of invented, the no-journal path still booking, and
+an order that can no longer fill keeping nothing.
+`test_tradingview_webhook.py` adds the demo evidence: the fill row's `source`/`signal_id`,
+`GET /api/activity` carrying executions and risk decisions, and the webhook order, its
+executions, and its position served over HTTP after a restart; `test_journal_reporting.py`
+holds the fill export.
+
+Verification (Phase 10 checkpoint 3): `523 passed, 150 subtests`.

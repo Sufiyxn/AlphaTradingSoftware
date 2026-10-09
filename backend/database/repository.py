@@ -7,6 +7,19 @@ from typing import Any
 from .serialization import from_json, to_json
 
 
+def _fill_context(context: Any, *, order_id: Any, side: Any) -> str:
+    """JSON for a fill row: the caller's labels plus the immutable ownership.
+
+    A fill is evidence, so it carries where it came from - the order that owns
+    it, and whatever the order's source was (which signal raised it). The
+    ownership fields are written last: no caller label can relabel them.
+    """
+    details = dict(context) if isinstance(context, dict) else {}
+    details["order_id"] = order_id
+    details["side"] = side.value if side is not None else None
+    return to_json(details)
+
+
 class SQLiteJournalRepository:
     """Small standard-library SQLite repository for auditable trade history."""
 
@@ -52,7 +65,8 @@ class SQLiteJournalRepository:
                              client_order_id: str | None = None,
                              symbol: str | None = None,
                              connection_id: str | None = None,
-                             provider_instance_id: str | None = None) -> bool:
+                             provider_instance_id: str | None = None,
+                             context: Any = None) -> bool:
         """Persist one provider fill exactly once. ``True`` only if inserted.
 
         Uniqueness is the composite of the provider scope and the fill's own
@@ -93,8 +107,7 @@ class SQLiteJournalRepository:
             float(getattr(fill, "fee", 0) or 0),
             (str(symbol or "")).strip().upper() or None,
             side.value if side is not None else None,
-            to_json({"order_id": owner,
-                     "side": side.value if side is not None else None}),
+            _fill_context(context, order_id=owner, side=side),
         )
         with self._lock, self._connection:
             cursor = self._connection.execute(

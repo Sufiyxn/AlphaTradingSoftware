@@ -118,11 +118,17 @@ class OrderLifecycleService:
                  journal: Any | None = None,
                  executor: Any | None = None,
                  clock: Callable[[], datetime] | None = None,
-                 restore: bool = True) -> None:
+                 restore: bool = True,
+                 fill_observer: Callable[..., None] | None = None) -> None:
         self.store = store if store is not None else OrderStore()
         self._journal = journal
         self._executor = executor
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        #: Called with ``(order, fills)`` for the fills this call made durable
+        #: for the first time. Phase 10 checkpoint 3: a position is booked from
+        #: durable fills, so the observer is the one place that learns about a
+        #: fill nobody has acted on yet - a replay never reaches it.
+        self.fill_observer = fill_observer
         self.reconciler = OrderReconciler(self.store)
         self.canceller = OrderCanceller(self.store, executor=executor,
                                         journal=journal, clock=self._clock,
@@ -245,17 +251,42 @@ class OrderLifecycleService:
         canonical order as if it had been. A replayed fill is one harmless
         ``INSERT OR IGNORE``, so reprocessing the same provider answer stays
         one row.
+
+        The fills this call made durable for the first time - new to the order
+        *and* new to the fill journal - are then announced to the fill
+        observer (checkpoint 3), which is how a fill reported after the
+        original submission still reaches the position.
         """
         moment = now or self._clock()
         order = self.store.require(order_id)
+        known = {fill.fill_id for fill in order.fills}
+        announced: list[Fill] = []
+        already_durable: list[str] = []
         fills = tuple(getattr(provider_order, "fills", ()) or ())
         if fills:
             identity = _provider_id(provider_order) or order.provider_order_id
             fills = tuple(self._identify(order, fill, provider_order_id=identity)
                           for fill in fills)
-            self._persist_fills(order, fills)
+            durable = self._persist_fills(order, fills)
+            for fill in fills:
+                if fill.fill_id in known:
+                    continue
+                if durable.get(fill.fill_id, True):
+                    announced.append(fill)
+                else:
+                    already_durable.append(fill.fill_id)
             order = with_fills(order, fills, moment, provider_order_id=identity)
             self.store.save(order)
+            if already_durable:
+                # The journal held executions this order had never seen: the
+                # two sides disagree, so it is reported - never assumed fine.
+                self._event(moment, "RECONCILIATION_DISCREPANCY",
+                            "the fill journal already held executions this "
+                            "order did not",
+                            symbol=order.symbol,
+                            context={"order_id": order.client_order_id,
+                                     "kind": "DURABLE_FILL_UNKNOWN_TO_ORDER",
+                                     "fill_ids": already_durable})
         status = getattr(provider_order, "status", None)
         if isinstance(status, OrderStatus) and status is not order.status:
             order = self.apply_status(order_id, status, moment,
@@ -274,6 +305,7 @@ class OrderLifecycleService:
                                  "fill_count": len(order.fills),
                                  "filled_quantity": order.filled_quantity,
                                  "status": order.status.value})
+        self._announce(order, tuple(announced))
         return order
 
     def record_fill(self, order_id: str, fill: Fill, now: datetime | None = None) -> Order:
@@ -283,12 +315,15 @@ class OrderLifecycleService:
         order is never told it executed more than the executions it carries.
         The fill is identified and persisted before it is merged, so a write
         that fails surfaces as :class:`FillPersistenceError` instead of a
-        fill that only exists in memory.
+        fill that only exists in memory. A fill that was already durable is
+        never announced: replaying an execution cannot book it twice.
         """
         moment = now or self._clock()
         order = self.store.require(order_id)
+        known = {existing.fill_id for existing in order.fills}
         fill = self._identify(order, fill)
-        self._persist_fills(order, (fill,))
+        durable = self._persist_fills(order, (fill,))
+        new_to_order = fill.fill_id not in known
         updated = add_fill(order, fill, moment)
         implied = status_for_fill(updated, updated.filled_quantity)
         transition_ok = implied is None or can_transition(order.status, implied)
@@ -319,6 +354,16 @@ class OrderLifecycleService:
                         context={"order_id": updated.client_order_id,
                                  "status": updated.status.value,
                                  "quantity": fill.quantity})
+        if new_to_order and durable.get(fill.fill_id, True):
+            self._announce(updated, (fill,))
+        elif new_to_order and fill.fill_id in durable:
+            self._event(moment, "RECONCILIATION_DISCREPANCY",
+                        "the fill journal already held an execution this "
+                        "order did not",
+                        symbol=updated.symbol,
+                        context={"order_id": updated.client_order_id,
+                                 "kind": "DURABLE_FILL_UNKNOWN_TO_ORDER",
+                                 "fill_ids": [fill.fill_id]})
         return updated
 
     def mark_submission_failed(self, order_id: str, reason: str,
@@ -476,7 +521,7 @@ class OrderLifecycleService:
             pass
 
     def _persist_fills(self, order: Order,
-                       fills: tuple[Fill, ...] | None = None) -> None:
+                       fills: tuple[Fill, ...] | None = None) -> dict[str | None, bool]:
         """Write provider fills to the durable fill journal, fail closed.
 
         This is the only place a fill becomes durable. It raises
@@ -487,28 +532,50 @@ class OrderLifecycleService:
         harmless. With no journal attached nothing is durable and nothing
         pretends to be - the write is skipped, exactly like every other
         persistence this service does.
+
+        Returns ``fill_id -> newly inserted``. The answer is what checkpoint
+        3 books positions from: ``True`` means this call is the first time the
+        journal saw the fill, ``False`` means a replay, and an empty mapping
+        (no journal) means there is no durable record to replay against.
         """
         pending = order.fills if fills is None else tuple(fills)
-        if self._journal is None or not pending:
-            return
+        if not pending:
+            return {}
+        if self._journal is None:
+            return {}
         record = getattr(self._journal, "record_provider_fill", None)
         if record is None:
             raise FillPersistenceError(
                 fill_id=pending[0].fill_id or "", order_id=order.client_order_id,
                 reason="this journal cannot store durable provider fills")
+        answers: dict[str | None, bool] = {}
         for fill in pending:
             try:
-                record(fill, order_id=order.client_order_id,
-                       client_order_id=order.client_order_id,
-                       symbol=order.symbol,
-                       connection_id=order.connection_id,
-                       provider_instance_id=order.provider_instance_id)
+                inserted = bool(record(fill, order_id=order.client_order_id,
+                                       client_order_id=order.client_order_id,
+                                       symbol=order.symbol,
+                                       connection_id=order.connection_id,
+                                       provider_instance_id=order.provider_instance_id,
+                                       context=_fill_labels(order)))
             except FillPersistenceError:
                 raise
             except Exception as error:  # noqa: BLE001 - re-raised, never hidden
                 raise FillPersistenceError(
                     fill_id=fill.fill_id or "", order_id=order.client_order_id,
                     reason=error) from error
+            answers[fill.fill_id] = inserted
+        return answers
+
+    def _announce(self, order: Order, fills: tuple[Fill, ...]) -> None:
+        """Hand the fills that became durable for the first time to the host.
+
+        Called exactly once per new fill, after it is merged and its durable
+        row exists, so a position booked from this callback is always backed
+        by a row in the fill journal. A replay never reaches here.
+        """
+        if not fills or self.fill_observer is None:
+            return
+        self.fill_observer(order, fills)
 
     def _identify(self, order: Order, fill: Fill, *,
                   provider_order_id: str | None = None) -> Fill:
@@ -535,4 +602,20 @@ class OrderLifecycleService:
 def _provider_id(provider_order: Any) -> str | None:
     value = getattr(provider_order, "order_id", None)
     return value if isinstance(value, str) and value else None
+
+
+def _fill_labels(order: Order) -> dict[str, Any]:
+    """Where a durable fill came from, so its row can stand on its own.
+
+    The fill row already names the order it belongs to; this adds the two
+    facts asked for next - which source created that order, and which signal
+    (when there was one) raised it - so reading executions never requires
+    joining another table.
+    """
+    intent = getattr(order, "intent", None)
+    labels: dict[str, Any] = {"source": getattr(intent, "source", None) or "internal"}
+    signal_id = getattr(intent, "signal_id", None)
+    if signal_id:
+        labels["signal_id"] = signal_id
+    return labels
 

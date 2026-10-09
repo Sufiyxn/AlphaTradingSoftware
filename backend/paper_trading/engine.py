@@ -14,7 +14,9 @@ from backend.execution import (
     ExecutionProvider,
     ExecutionSafetyGate,
     LocalPaperAdapter,
+    OrderStatus,
 )
+from backend.orders import Fill, Order, is_terminal
 from backend.pipeline import ExecutionIntent, PipelineCode, TradingPipeline
 from backend.portfolio import Portfolio
 from backend.portfolio.models import PriceState
@@ -64,6 +66,13 @@ class PaperTradingEngine:
         self._journal = journal
         self._records: dict[str, PaperTradeRecord] = {}
         self._setups: dict[str, TradeSetup] = {}
+        # Phase 10 checkpoint 3: which durable fills are already inside the
+        # position, per order. Booking is keyed by the fill's own identity, so
+        # a replayed provider answer can never book the same execution twice.
+        self._booked_fills: dict[str, set[str]] = {}
+        self._risks: dict[str, RiskDecision] = {}
+        self._analyses: dict[str, object] = {}
+        self.pipeline.fill_observer = self._on_durable_fills
 
     # -- wiring: journal and execution adapter ------------------------------
 
@@ -195,23 +204,34 @@ class PaperTradingEngine:
         if order is None:
             return self._submission(result, risk, None, None)
         order_id = getattr(order, "order_id", None)
+        setup = result.setup
+        if (risk is not None and risk.approved and isinstance(setup, TradeSetup)
+                and order_id is not None):
+            # Remember what the trade is even while the provider has not
+            # filled it: a fill that arrives later (checkpoint 3) must still
+            # open the position with this setup's stop and target.
+            self._setups[order_id] = setup
+            self._risks[order_id] = risk
+            self._analyses[order_id] = analysis
+        self._prune_pending_setups()
         if result.duplicate or order_id in self._records:
             # An idempotent retry never books twice; the first booking stands.
             return self._submission(result, risk, order, self._records.get(order_id))
         if (result.code != PipelineCode.ACCEPTED or risk is None
-                or not risk.approved or result.setup is None):
+                or not risk.approved or setup is None):
             return self._submission(result, risk, order, None)
 
-        setup = result.setup
         filled = order.filled_quantity
         actual_fill = order.average_fill_price or result.limit_price
-        self.portfolio.open_position(setup.symbol, setup.direction, filled,
-                                     actual_fill, setup.timestamp)
         record = PaperTradeRecord(setup.symbol, setup.direction, setup.timestamp,
                                   actual_fill, setup.stop_price, setup.target_price,
                                   filled, setup.strategy_name, order.order_id)
         self._records[order.order_id] = record
-        self._setups[order.order_id] = setup
+        # Nothing about this order is inside the position yet, so every fill
+        # it carries is bookable exactly once.
+        self._booked_fills[order.order_id] = set()
+        self._book_fills(order, order.fills, opened_at=setup.timestamp,
+                         symbol=setup.symbol, direction=setup.direction)
         self._journal_call("record_trade_open", record, setup=setup, risk=risk,
                            analysis=analysis)
         self._journal_call("record_position_event", setup.timestamp, setup.symbol,
@@ -219,6 +239,134 @@ class PaperTradingEngine:
                            {"order_id": order.order_id, "quantity": filled,
                             "price": actual_fill})
         return self._submission(result, risk, order, record)
+
+    # -- durable fills -> position (Phase 10 checkpoint 3) -------------------
+    def _on_durable_fills(self, order: Order, fills: tuple[Fill, ...]) -> None:
+        """Book fills that just became durable, at most once each.
+
+        Called by the order lifecycle the moment a fill is written to the fill
+        journal for the first time. Two cases reach here:
+
+        * the trade is already open - a later execution for the same order
+          (a partial that completes, a provider's delayed answer) adds to the
+          position and to the trade record, so exits still close what was
+          actually bought;
+        * the trade does not exist yet - an order the pipeline reported as
+          accepted-but-unfilled that fills afterwards opens its position here,
+          with the setup the submission was approved on.
+
+        A fill that is not new to the order or not new to the journal never
+        reaches this method, so a replay books nothing.
+        """
+        if not fills:
+            return
+        order_id = order.order_id
+        record = self._records.get(order_id)
+        if record is None:
+            record = self._open_trade_from(order)
+            if record is None:
+                return
+            self._book_fills(order, order.fills, opened_at=record.entry_timestamp,
+                             symbol=record.symbol, direction=record.direction)
+            self._journal_call("record_trade_open", record,
+                               setup=self._setups.get(order_id),
+                               risk=self._risks.get(order_id),
+                               analysis=self._analyses.get(order_id))
+            self._journal_call("record_position_event", record.entry_timestamp,
+                               record.symbol, "OPENED",
+                               {"order_id": order_id,
+                                "quantity": order.filled_quantity,
+                                "price": record.entry_price,
+                                "source": "durable fill"})
+            return
+        booked = self._booked_fills.get(order_id)
+        if booked is None:
+            # Restored after a restart: everything the order already carried
+            # was inside the restored position, except the fills being
+            # announced right now.
+            announced = {fill.fill_id for fill in fills}
+            booked = {fill.fill_id for fill in order.fills
+                      if fill.fill_id and fill.fill_id not in announced}
+            self._booked_fills[order_id] = booked
+        fresh = tuple(fill for fill in fills if fill.fill_id not in booked)
+        if not fresh:
+            return
+        added = self._book_fills(order, fresh, symbol=record.symbol,
+                                 direction=record.direction)
+        if added <= 0:
+            return
+        added_cost = sum(fill.quantity * fill.price for fill in fresh
+                         if fill.quantity > 0 and fill.price > 0)
+        quantity = record.quantity + added
+        # The trade keeps the average the position now carries: its quantity
+        # and entry price are what a restart rebuilds cash from, so leaving
+        # the original entry price behind would drift the ledger on restart.
+        entry_price = (record.entry_price * record.quantity + added_cost) / quantity
+        updated = replace(record, quantity=quantity, entry_price=entry_price)
+        self._records[order_id] = updated
+        # The trade row must carry the quantity the position now holds, or a
+        # restart would rebuild a smaller position than the fills describe.
+        setup = self._setups.get(order_id)
+        self._journal_call("record_trade_open", updated, setup=setup,
+                           risk=self._risks.get(order_id),
+                           analysis=self._analyses.get(order_id))
+        self._journal_call("record_position_event", fresh[-1].timestamp,
+                           updated.symbol, "ADDED",
+                           {"order_id": order_id, "quantity": added,
+                            "price": (sum(f.quantity * f.price for f in fresh)
+                                      / added),
+                            "filled_quantity": updated.quantity,
+                            "source": "durable fill"})
+
+    def _open_trade_from(self, order: Order) -> PaperTradeRecord | None:
+        """The trade record an unrecorded filled order deserves, or ``None``.
+
+        Only a risk-approved submission with a known setup may open a trade,
+        and only an order the provider actually filled: a rejected or merely
+        submitted order never becomes a position.
+        """
+        setup = self._setups.get(order.order_id)
+        if setup is None:
+            return None
+        if order.status not in (OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED):
+            return None
+        if order.filled_quantity <= 0:
+            return None
+        record = PaperTradeRecord(
+            setup.symbol, setup.direction, setup.timestamp,
+            order.average_fill_price or setup.entry_price,
+            setup.stop_price, setup.target_price, order.filled_quantity,
+            setup.strategy_name, order.order_id)
+        self._records[order.order_id] = record
+        self._booked_fills[order.order_id] = set()
+        return record
+
+    def _book_fills(self, order: Order, fills, *, opened_at=None,
+                    symbol: str | None = None,
+                    direction: Direction | None = None) -> float:
+        """Move these executions into the portfolio; return what was booked.
+
+        Each fill is booked under its own identity, at the price the provider
+        reported for it - never at an averaged or invented price - and the
+        portfolio keeps the position's original open time.
+        """
+        order_id = order.order_id
+        symbol = symbol or order.symbol
+        direction = direction if direction is not None else order.direction
+        booked = 0.0
+        for fill in fills:
+            if fill.fill_id and fill.fill_id in self._booked_fills.setdefault(
+                    order_id, set()):
+                continue
+            if fill.quantity <= 0 or fill.price <= 0:
+                continue
+            self.portfolio.open_position(symbol, direction,
+                                         fill.quantity, fill.price,
+                                         opened_at or fill.timestamp)
+            booked += float(fill.quantity)
+            if fill.fill_id:
+                self._booked_fills[order_id].add(fill.fill_id)
+        return booked
 
     def _submission(self, result, risk, order, trade) -> SubmissionResult:
         return SubmissionResult(risk, order, trade, code=result.code,
@@ -300,15 +448,46 @@ class PaperTradingEngine:
                 self._journal_call("record_position_event", closed_at, record.symbol, "CLOSED",
                                    {"order_id": order_id, "quantity": record.quantity, "price": fill,
                                     "pnl": trade_pnl, "reason": "MANUAL"})
-                del self._records[order_id]
-                self._setups.pop(order_id, None)
+                self._forget(order_id)
         return pnl
 
+    def _forget(self, order_id: str) -> None:
+        """Drop every per-order booking memory once the trade is closed."""
+        self._records.pop(order_id, None)
+        self._setups.pop(order_id, None)
+        self._risks.pop(order_id, None)
+        self._analyses.pop(order_id, None)
+        self._booked_fills.pop(order_id, None)
+
+    def _prune_pending_setups(self) -> None:
+        """Forget what was remembered for an order that can no longer fill.
+
+        The approved setup is kept so a fill arriving later still opens the
+        trade with its stop and target. Once an order reaches a terminal state
+        without an execution there is nothing left to open, so remembering it
+        would only accumulate.
+        """
+        for order_id in tuple(self._setups):
+            if order_id in self._records:
+                continue
+            order = self.pipeline.orders.get(order_id)
+            if order is None or (is_terminal(order.status) and not order.fills):
+                self._forget(order_id)
+
     def restore_trade(self, record: PaperTradeRecord, setup: TradeSetup | None = None) -> None:
-        """Re-arm a persisted open trade after a restart."""
+        """Re-arm a persisted open trade after a restart.
+
+        The fills the restored order already carries are marked booked, so the
+        first provider answer after a restart cannot book them a second time;
+        a fill the order does *not* carry yet still books normally.
+        """
         self._records[record.order_id] = record
         if setup is not None:
             self._setups[record.order_id] = setup
+        order = self.pipeline.orders.get(record.order_id)
+        if order is not None:
+            self._booked_fills[record.order_id] = {
+                fill.fill_id for fill in order.fills if fill.fill_id}
 
     def _auto_exit_allowed(self, symbol: str) -> bool:
         position = next((item for item in self.portfolio.positions if item.symbol == symbol), None)
@@ -333,8 +512,7 @@ class PaperTradingEngine:
         self._journal_call("record_position_event", timestamp, symbol, "CLOSED",
                            {"order_id": order_id, "quantity": record.quantity, "price": exit_price,
                             "pnl": trade_pnl, "reason": reason})
-        self._records.pop(order_id)
-        self._setups.pop(order_id, None)
+        self._forget(order_id)
         return True
 
     def _journal_call(self, method: str, *args, **kwargs) -> None:

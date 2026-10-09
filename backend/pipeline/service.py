@@ -175,6 +175,20 @@ class TradingPipeline:
         self.orders.attach_journal(value)
 
     @property
+    def fill_observer(self):
+        """Who is told about a fill the moment it becomes durable.
+
+        Phase 10 checkpoint 3: the host that owns positions (the paper engine)
+        subscribes here so a fill reported after the original submission still
+        books, while a replayed fill never reaches it.
+        """
+        return self.orders.fill_observer
+
+    @fill_observer.setter
+    def fill_observer(self, value) -> None:
+        self.orders.fill_observer = value
+
+    @property
     def gate(self):
         """The execution safety gate shared with connection readiness."""
         return self._connections.gate

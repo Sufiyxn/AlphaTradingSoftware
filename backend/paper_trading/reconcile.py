@@ -92,7 +92,68 @@ def reconcile_journal(*, portfolio, engine: PaperTradingEngine, repository,
     if skipped:
         logging.getLogger(__name__).warning(
             "Journal reconciliation skipped %d row(s) that could not be parsed", skipped)
+    reported = report_durable_fill_divergence(engine=engine, repository=repository, now=now)
+    summary["fill_divergences"] = reported
     return summary
+
+
+def report_durable_fill_divergence(*, engine: PaperTradingEngine, repository,
+                                   now: datetime) -> int:
+    """Journal durable fills that no trade row accounts for.
+
+    Positions are rebuilt from the trade book, so a fill the journal holds but
+    no trade describes would vanish on a restart. That is a real divergence,
+    so it is reported as a discrepancy - it is never silently ignored and
+    never turned into a position: the platform does not open a trade it
+    cannot reconstruct from its own records. Returns how many were reported.
+    """
+    if repository is None:
+        return 0
+    known: set[str] = set()
+    for row in (*repository.open_trades(), *repository.closed_trades()):
+        for key in ("order_id", "trade_id"):
+            value = row.get(key)
+            if value:
+                known.add(str(value))
+    orders = tuple(engine.pipeline.orders.list())
+    order_ids = {order.order_id for order in orders}
+    reported = 0
+
+    def note(message: str, *, symbol: str | None, context: dict) -> None:
+        nonlocal reported
+        reported += 1
+        try:
+            repository.record_event(now, "RECONCILIATION_DISCREPANCY", message,
+                                    symbol=symbol, context=context)
+        except Exception:  # noqa: BLE001 - a report must not break recovery
+            logging.getLogger(__name__).exception(
+                "Unable to persist a durable-fill divergence report")
+
+    for order in orders:
+        if order.filled_quantity <= 0 or order.order_id in known:
+            continue
+        note("the journal holds executions for an order no trade row describes",
+             symbol=order.symbol,
+             context={"kind": "DURABLE_FILL_WITHOUT_TRADE",
+                      "order_id": order.order_id,
+                      "symbol": order.symbol,
+                      "filled_quantity": order.filled_quantity,
+                      "status": order.status.value})
+
+    seen: set[str] = set()
+    for row in repository.rows("fills"):
+        owner = str(row.get("client_order_id") or row.get("order_id") or "").strip()
+        if not owner or owner in known or owner in order_ids or owner in seen:
+            continue
+        seen.add(owner)
+        note("the fill journal holds executions for an order the journal "
+             "cannot reconstruct",
+             symbol=row.get("symbol"),
+             context={"kind": "DURABLE_FILL_WITHOUT_ORDER",
+                      "order_id": owner,
+                      "symbol": row.get("symbol"),
+                      "fill_id": row.get("fill_id")})
+    return reported
 
 
 def _sign(direction: Direction) -> int:
