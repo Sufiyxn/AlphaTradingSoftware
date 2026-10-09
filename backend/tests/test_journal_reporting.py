@@ -127,6 +127,30 @@ class JournalReportingTests(unittest.TestCase):
         destination = exports.write(Path(self.temp.name) / "out" / "events.json", "errors")
         self.assertTrue(destination.exists())
 
+    def test_a_full_export_carries_the_durable_fill_journal(self):
+        from backend.execution import Fill
+        from backend.execution.fill_identity import normalize_fill
+
+        fill = normalize_fill(Fill(3.0, 25.5, BASE), connection_id="paper",
+                              provider_instance_id="inst-1",
+                              client_order_id="ORD-1", provider_order_id="PROV-1")
+        self.assertTrue(self.repository.record_provider_fill(
+            fill, order_id="ORD-1", client_order_id="ORD-1", symbol="AAA",
+            connection_id="paper", provider_instance_id="inst-1",
+            context={"source": "tradingview", "signal_id": "sig-1"}))
+
+        exports = LogExportService(self.repository)
+        kinds = json.loads(exports.export("all"))
+        recorded = [row for row in kinds if row["record_type"] == "fills"]
+        self.assertEqual(len(recorded), 1, "a full export carries executions")
+        self.assertEqual(recorded[0]["symbol"], "AAA")
+        self.assertEqual(recorded[0]["context_json"]["source"], "tradingview")
+        self.assertEqual(recorded[0]["context_json"]["signal_id"], "sig-1")
+
+        only_fills = json.loads(exports.export("fills"))
+        self.assertEqual(len(only_fills), 1)
+        self.assertEqual(only_fills[0]["fill_id"], fill.fill_id)
+
     def test_database_failure_surfaces_to_caller(self):
         self.repository.close()
         with self.assertRaises(Exception):

@@ -43,12 +43,14 @@
 > `docs/ORDERS.md`.*
 > **Phase 10 has started: checkpoint 1 (durable provider-order identity) is implemented and
 > verified — `486 passed, 150 subtests`; checkpoint 2 (durable fill identity + a durable fill
-> journal) is implemented and verified — `509 passed, 150 subtests`; `tsc --noEmit` clean;
-> `npm run build` succeeds; HTTP smoke passed with 16 checks (the four documented endpoints
-> parsed as JSON, one signed paper trade whose fill returns over HTTP carrying its
-> scope-qualified identity and the paper venue's own `-F<n>` number, cancel refused on a filled
-> order, reconcile, logs, and no secret in any response body) — checkpoints 3–6 have not
-> started.**
+> journal) is implemented and verified — `509 passed, 150 subtests`; checkpoint 3 (positions are
+> booked from durable fills, exactly once) is implemented and verified — `523 passed, 150
+> subtests`; `tsc --noEmit` clean; `npm run build` succeeds; HTTP smoke passed with 41 checks and
+> is now committed as `scripts/http_smoke.py` (the four documented endpoints parsed as JSON, a
+> signed paper trade whose order, fill, position, risk decision and activity rows are all served
+> over HTTP, replay and missing-authentication refusals, owner-token guards, read-only reconcile,
+> the durable fill journal exported, and no credential in any response body) — checkpoints 4–6
+> have not started.**
 
 ---
 
@@ -138,7 +140,11 @@
 - `node node_modules\typescript\bin\tsc --noEmit -p tsconfig.json` in `frontend/`.
 - `npm.cmd run build` in `frontend/`.
 - HTTP smoke against a running instance: `/api/status`, `/api/positions`, `/api/readiness`,
-  `/api/connections` parsed as JSON.
+  `/api/connections` parsed as JSON — committed as `scripts/http_smoke.py`, which boots the app
+  in-process on a temporary database with no market-data provider attached (so it can never
+  reach a vendor API) and checks the whole documented HTTP surface, including a signed webhook
+  trade, the owner-token guards, and a scan of every response for the credentials that run
+  configured.
 - `git diff` reviewed for accidental regressions.
 - Explicit confirmation: no synthetic/demo data introduced, no `MOCK` reachable from the
   production runtime.

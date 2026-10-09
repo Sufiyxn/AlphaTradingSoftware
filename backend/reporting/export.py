@@ -9,8 +9,8 @@ from backend.database import JournalRepository
 
 
 class LogExportService:
-    KINDS = ("trades", "orders", "signals", "risk_decisions", "ai_analyses",
-             "position_events", "system_events", "errors")
+    KINDS = ("trades", "orders", "fills", "signals", "risk_decisions",
+             "ai_analyses", "position_events", "system_events", "errors")
 
     def __init__(self, repository: JournalRepository):
         self.repository = repository

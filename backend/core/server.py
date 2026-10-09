@@ -74,7 +74,14 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     events = [{"record_type": "system", **row} for row in runtime.repository.events(symbol=symbol, limit=limit)]
                     errors = [{"record_type": "error", **row} for row in runtime.repository.errors(symbol=symbol, limit=limit)]
                     orders = [{"record_type": "order", **row} for row in runtime.repository.rows("orders", symbol=symbol)[:limit]]
-                    result = {"events": sorted(events + errors + orders,
+                    fills = [{**row, "record_type": "fill",
+                              "message": f"executed {row.get('quantity')} @ {row.get('price')}"}
+                             for row in runtime.repository.rows("fills", symbol=symbol)[:limit]]
+                    decisions = [{**row, "record_type": "risk",
+                                  "message": "risk decision: "
+                                             + ("APPROVED" if row.get("approved") else "REJECTED")}
+                                 for row in runtime.repository.rows("risk_decisions", symbol=symbol)[:limit]]
+                    result = {"events": sorted(events + errors + orders + fills + decisions,
                                                key=lambda item: str(item.get("timestamp", "")), reverse=True)[:limit]}
                 elif path == "/api/performance":
                     result = runtime.performance.calculate(

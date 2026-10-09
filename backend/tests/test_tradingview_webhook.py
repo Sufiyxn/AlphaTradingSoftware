@@ -412,6 +412,26 @@ class WebhookTradingTests(unittest.TestCase):
             if os.path.exists(database.name):
                 os.unlink(database.name)
 
+    def test_the_durable_fill_row_names_the_source_that_raised_it(self):
+        runtime = build_runtime()
+        try:
+            response = send(runtime, payload(alert_id="fill-evidence"))
+            self.assertEqual(response.status, 202, response.body)
+
+            fills = runtime.repository.rows("fills")
+            self.assertEqual(len(fills), 1, "the execution is durable in its own row")
+            row = fills[0]
+            self.assertEqual(row["symbol"], "AAPL")
+            self.assertEqual(row["quantity"], positions(runtime)["AAPL"].quantity,
+                             "the position holds exactly what the row records")
+            context = row["context_json"]
+            self.assertEqual(context["source"], "tradingview")
+            self.assertTrue(context["signal_id"],
+                            "the signal that raised the fill is recorded with it")
+            self.assertEqual(context["order_id"], row["client_order_id"])
+        finally:
+            runtime.close()
+
     def test_risk_rejection_does_not_execute(self):
         runtime = build_runtime()
         try:
@@ -753,6 +773,73 @@ class HttpEndpointTests(unittest.TestCase):
         self.assertEqual(connections["tradingview"]["state"], "UNAVAILABLE")
         self.assertEqual(connections["tradingview"]["endpoint_status"], "INSTALLED")
         self.assertNotIn(SECRET, json.dumps(connections))
+
+    def test_the_activity_feed_carries_executions_and_risk_decisions(self):
+        body = encode(payload(alert_id="activity-evidence"))
+        accepted, _ = self.post(ENDPOINT, body, signed_headers(body))
+        self.assertEqual(accepted, 202)
+
+        status, document = self.get("/api/activity?limit=50")
+        self.assertEqual(status, 200)
+        rows = document["events"]
+        kinds = {row["record_type"] for row in rows}
+        self.assertIn("fill", kinds, "the journal feed shows executions")
+        self.assertIn("risk", kinds, "the journal feed shows the risk gate")
+        fill = next(row for row in rows if row["record_type"] == "fill")
+        self.assertIn("executed", fill["message"])
+        self.assertEqual(fill["symbol"], "AAPL")
+        risk = next(row for row in rows if row["record_type"] == "risk")
+        self.assertIn("APPROVED", risk["message"])
+        self.assertNotIn(SECRET, json.dumps(document))
+
+    def test_the_webhook_order_and_its_executions_are_served_after_a_restart(self):
+        database = tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite3")
+        database.close()
+        os.unlink(database.name)
+        try:
+            first = build_runtime(database_path=database.name)
+            try:
+                self.assertEqual(send(first, payload(alert_id="restart-evidence")).status, 202)
+            finally:
+                first.close()
+
+            second = build_runtime(database_path=database.name)
+            server = create_server(second, "127.0.0.1", 0)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def get(path: str) -> dict:
+                with urlrequest.urlopen(f"http://127.0.0.1:{port}{path}",
+                                        timeout=10) as response:
+                    return json.loads(response.read().decode("utf-8"))
+
+            try:
+                orders = get("/api/orders")
+                self.assertEqual(orders["count"], 1)
+                order = orders["orders"][0]
+                self.assertEqual(order["status"], "FILLED")
+                self.assertEqual(order["symbol"], "AAPL")
+                self.assertEqual(order["source"], "tradingview")
+                self.assertTrue(order["signal_id"])
+                self.assertEqual(order["filled_quantity"], 5)
+                self.assertEqual(len(order["fills"]), 1)
+
+                fills = get("/api/logs?kind=fills")
+                self.assertTrue(any(row.get("record_type") == "fills" for row in fills),
+                                "the durable fill journal is exported over HTTP")
+
+                restored = get("/api/positions")
+                self.assertEqual(len(restored["positions"]), 1)
+                self.assertEqual(restored["positions"][0]["quantity"], 5)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                second.close()
+        finally:
+            if os.path.exists(database.name):
+                os.unlink(database.name)
 
 
 if __name__ == "__main__":
