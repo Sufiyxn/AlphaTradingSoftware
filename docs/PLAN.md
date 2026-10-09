@@ -45,12 +45,15 @@
 > verified — `486 passed, 150 subtests`; checkpoint 2 (durable fill identity + a durable fill
 > journal) is implemented and verified — `509 passed, 150 subtests`; checkpoint 3 (positions are
 > booked from durable fills, exactly once) is implemented and verified — `523 passed, 150
-> subtests`; `tsc --noEmit` clean; `npm run build` succeeds; HTTP smoke passed with 41 checks and
-> is now committed as `scripts/http_smoke.py` (the four documented endpoints parsed as JSON, a
-> signed paper trade whose order, fill, position, risk decision and activity rows are all served
-> over HTTP, replay and missing-authentication refusals, owner-token guards, read-only reconcile,
-> the durable fill journal exported, and no credential in any response body) — checkpoints 4–6
-> have not started.**
+> subtests`; checkpoint 4 (owner-authorized exit as a first-class path) is implemented and
+> verified — `536 passed, 164 subtests`; `tsc --noEmit` clean; `npm run build` succeeds; HTTP
+> smoke passed with 50 checks and is now committed as `scripts/http_smoke.py` (the four
+> documented endpoints parsed as JSON, a signed paper trade whose order, fill, position, risk
+> decision and activity rows are all served over HTTP, replay and missing-authentication
+> refusals, owner-token guards, read-only reconcile, the owner close with its token guard,
+> refused price, second-close refusal and emptied position list, the durable fill journal
+> exported, and no credential in any response body) — checkpoints 5–6 (partial exit, stop/target
+> adjustment) are defined below and have not started.**
 
 ---
 
@@ -596,6 +599,78 @@ Delivered scope (as approved):
   entry → open position → monitoring → risk changes → exit conditions → close → reconciliation →
   final P&L; dynamic position management; scaling/adjustment where supported; positions remain
   `UNPRICED` until a fresh real mark exists.
+
+#### Phase 10 checkpoints 4–6 (CP1–CP4 complete; CP5–CP6 defined below, not started)
+
+Checkpoints 1–3 made *entry* deterministic: provider-order identity, durable fill identity, and
+positions booked from durable fills, exactly once. Reading the phase's own remaining words —
+**risk changes**, **scaling/adjustment**, and an **exit → close → final P&L** path that does not
+depend on an external signal source — plus what the code actually lacks, gives the three
+non-overlapping checkpoints below. They are ordered by dependency; a checkpoint is only recorded
+as done when its acceptance criteria and regression tests pass.
+
+**Checkpoint 4 — owner-authorized exit is a first-class path.**
+- *Outstanding defect:* `PaperTradingEngine.close()` exists but is reachable only from a
+  TradingView `EXIT` alert (`tradingview/service.py`). With no market-data provider attached —
+  the exact configuration the committed smoke and demo run in — automatic stop/target exits
+  cannot run either, so an open paper position has no way to be closed from this platform, and
+  "exit → close → final P&L" is unreachable in the demo.
+- *Scope:* owner-guarded `POST /api/positions/close` → new `ApplicationRuntime.close_position()`
+  → the existing `PaperTradingEngine.close()`, running under the submission lock. No new engine
+  semantics: the same slippage, fees, journal writes and trade-close accounting the automatic
+  and signal exits already use.
+- *Acceptance criteria:* `401` without `X-Owner-Token`; `503` when owner controls are disabled;
+  `400` when the symbol or price is missing, non-numeric, zero, negative or non-finite; `404`
+  when no open position exists for the symbol **and** when a position is closed a second time
+  (a repeat close is never reported as success); `200` only with `closed: true`, the real
+  `symbol`, `quantity`, `requested_price` and `realized_pnl`; exactly one `CLOSED` position event
+  and one `record_trade_close` per successful close; the order keeps `FILLED`; no price is ever
+  defaulted, marked or derived from the entry; the response states `execution: PAPER`.
+- *Regression tests:* new `backend/tests/test_position_exits.py` (engine + HTTP status
+  mapping + journal counts + arithmetic) and new HTTP-smoke checks (owner-token guard, refused
+  price, successful close, empty position list afterwards, second close refused).
+- *Depends on:* CP3.
+- *Status:* **DONE** — `ApplicationRuntime.close_position()` (submission lock, caller-supplied
+  price, `INVALID_SYMBOL`/`INVALID_PRICE`/`POSITION_NOT_FOUND`/`CLOSE_FAILED` codes) +
+  owner-guarded `POST /api/positions/close`; verified `536 passed, 164 subtests` (11 tests and
+  12 subtests in the new `backend/tests/test_position_exits.py`) and `50/50` HTTP-smoke checks.
+
+**Checkpoint 5 — scaling: a partial exit.**
+- *Outstanding gap:* `Portfolio.close_position()` already accepts a quantity, but the only close
+  path closes the whole position, so "scaling/adjustment where supported" has no reachable
+  surface and a holder cannot reduce exposure without exiting entirely.
+- *Scope:* an optional `quantity` on the close path (engine + `POST /api/positions/close`),
+  defaulting to the full position so CP4 behaviour is unchanged.
+- *Acceptance criteria:* a partial close reduces the position by exactly the requested quantity
+  and leaves the remainder at the **same weighted entry price**; realized P&L and fees are
+  proportional to the quantity sold and the sum of partial P&L equals the full-close P&L for the
+  same exit price; cash and exposure move only by the realized amount; the trade row stays open
+  until the last unit leaves (`CLOSED_PARTIAL`, never `CLOSED`, until then) and is closed exactly
+  once on the final unit; requesting more than is held is refused without changing state; the
+  remainder still marks, sizes and auto-exits normally.
+- *Regression tests:* `backend/tests/test_position_exits.py` extended (remainder entry/quantity,
+  P&L additivity, trade-row lifecycle, over-close refusal, exposure after partial).
+- *Depends on:* CP4.
+
+**Checkpoint 6 — risk changes: stop/target adjustment on an open position.**
+- *Outstanding gap:* the phase requires *risk changes* and *dynamic position management*; stop
+  and target are fixed at entry, so the levels automatic exit uses can never be tightened after
+  the fact.
+- *Scope:* owner-guarded `POST /api/positions/risk` that moves `stop_price` / `target_price` for
+  one open paper position, persisted on the `trades` row so a restart restores the new levels.
+- *Acceptance criteria:* fail-closed — only a **risk-reducing** stop move is accepted (long:
+  strictly higher than the current stop; short: strictly lower), the new stop must stay on the
+  losing side of entry so risk per unit stays `> 0`, the target must stay beyond entry, and the
+  resulting reward:risk must stay at or above the configured minimum (the 2:1 floor is a fixed
+  safety requirement); prices must be positive and finite; `401` / `400` / `404` (no such open
+  position) as above; entry price, quantity and fills are untouched; exactly one `RISK_CHANGED`
+  position event carrying old and new values; automatic stop/target evaluation uses the new
+  levels immediately and after a restart.
+- *Regression tests:* new `backend/tests/test_position_risk.py` (tighten accepted, loosen
+  rejected, stop-through-entry rejected, 2:1 floor, restart persistence, auto-exit at the new
+  stop, HTTP status mapping).
+- *Depends on:* CP3; sequenced after CP4/CP5 because it changes the same levels those
+  checkpoints read, and it must not alter how a close accounts for a fill.
 
 ### PHASE 11 — Market-Session / Market-Hours Handling
 - Market-session awareness (pre/open/after/close/holiday), trading-window enforcement per asset

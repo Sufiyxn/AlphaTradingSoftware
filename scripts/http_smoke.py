@@ -223,6 +223,28 @@ def main() -> int:
                               {"Content-Type": "application/json"})
         smoke.check("an unauthenticated signal is refused", unsigned[0] == 401)
 
+        # An unsafe signal: the same entry with a 1:0.5 reward:risk, which the
+        # risk engine must refuse before any order exists.
+        unsafe_body = json.dumps({**WEBHOOK_BODY, "alert_id": "smoke-alert-unsafe",
+                                  "take_profit": 51.0}).encode("utf-8")
+        unsafe, unsafe_payload = smoke.post(ENDPOINT, unsafe_body,
+                                            smoke.webhook_headers(unsafe_body))
+        smoke.check("an unsafe signal is refused by risk", unsafe == 422
+                    and unsafe_payload.get("code") == "RISK_REJECTED",
+                    f"{unsafe} {unsafe_payload.get('code')}")
+        smoke.check("the refusal names the failing risk rule",
+                    bool(unsafe_payload.get("reasons")))
+        _, unchanged = smoke.get("/api/orders")
+        smoke.check("the refused signal created no order", unchanged.get("count") == 1,
+                    str(unchanged.get("count")))
+        _, rejected_feed = smoke.get("/api/activity?limit=200")
+        rejected_rows = [row for row in rejected_feed.get("events", [])
+                         if row.get("record_type") == "risk" and not row.get("approved")]
+        smoke.check("the rejected risk decision is journaled with its reasons",
+                    bool(rejected_rows)
+                    and bool(rejected_rows[0].get("reasons_json")),
+                    str(rejected_rows[0].get("reasons_json"))[:80] if rejected_rows else "none")
+
         unguarded = smoke.post("/api/orders/cancel",
                                json.dumps({"order_id": "whatever"}).encode("utf-8"),
                                {"Content-Type": "application/json"})
@@ -238,6 +260,38 @@ def main() -> int:
                                 "X-Owner-Token": owner_token})
         smoke.check("read-only reconcile reports MATCH",
                     reconcile[0] == 200 and reconcile[1].get("status") == "MATCH")
+
+        # Phase 10 checkpoint 4: the owner can close the paper position the
+        # signal opened, without a signal source and without a fabricated price.
+        unguarded_close = smoke.post(
+            "/api/positions/close",
+            json.dumps({"symbol": "AAPL", "price": 50.5}).encode("utf-8"),
+            {"Content-Type": "application/json"})
+        smoke.check("an owner close requires the owner token",
+                    unguarded_close[0] == 401)
+        priceless = smoke.post(
+            "/api/positions/close", json.dumps({"symbol": "AAPL"}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("a close without a real price is refused", priceless[0] == 400,
+                    str(priceless[1].get("code")))
+        closed = smoke.post(
+            "/api/positions/close",
+            json.dumps({"symbol": "AAPL", "price": 50.5}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("the owner close closes the paper position",
+                    closed[0] == 200 and closed[1].get("closed") is True
+                    and closed[1].get("execution") == "PAPER"
+                    and isinstance(closed[1].get("realized_pnl"), (int, float)),
+                    f"{closed[0]} {closed[1].get('code')}")
+        _, emptied = smoke.get("/api/positions")
+        smoke.check("no position remains after the close",
+                    emptied.get("positions") == [])
+        repeat = smoke.post(
+            "/api/positions/close",
+            json.dumps({"symbol": "AAPL", "price": 50.5}).encode("utf-8"),
+            {"Content-Type": "application/json", "X-Owner-Token": owner_token})
+        smoke.check("a second close is refused", repeat[0] == 404,
+                    str(repeat[0]))
 
         smoke.scan_for_secrets()
 

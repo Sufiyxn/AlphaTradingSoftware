@@ -181,6 +181,13 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 if parsed.path == "/api/orders/reconcile":
                     controls.authorize_owner(token)
                     return self._send(200, runtime.reconcile_orders())
+                if parsed.path == "/api/positions/close":
+                    controls.authorize_owner(token)
+                    outcome = runtime.close_position(body.get("symbol"),
+                                                     body.get("price"))
+                    status = 200 if outcome.get("closed") else (
+                        404 if outcome.get("code") == "POSITION_NOT_FOUND" else 400)
+                    return self._send(status, outcome)
                 actions = {
                     "/api/control/start": lambda: controls.start(token),
                     "/api/control/stop": lambda: controls.stop(token),

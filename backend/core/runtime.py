@@ -6,6 +6,7 @@ account, and no test fixture; fixtures are injected by tests through
 ``market_data_provider`` only.
 """
 import logging
+import math
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -195,6 +196,43 @@ class ApplicationRuntime:
         """Cancel one order under the submission lock; failures stay visible."""
         with self.paper.pipeline.submission_lock:
             return self.orders.cancel(str(order_id or "")).to_dict()
+
+    def close_position(self, symbol, price) -> dict:
+        """Owner-authorized close of one open paper position (phase 10 CP4).
+
+        The exit price is supplied by the caller and is never defaulted,
+        marked or derived from the entry: a fabricated exit price would be a
+        fabricated P&L. The close runs under the submission lock so it cannot
+        interleave with a submission or a booking, and it reuses the same
+        slippage, fee, journal and trade-close accounting as an automatic or
+        signal-driven exit.
+        """
+        name = str(symbol or "").strip().upper()
+        if not name:
+            return {"closed": False, "code": "INVALID_SYMBOL",
+                    "error": "symbol is required"}
+        if (isinstance(price, bool) or not isinstance(price, (int, float))
+                or not math.isfinite(price) or price <= 0):
+            return {"closed": False, "code": "INVALID_PRICE",
+                    "error": "price must be a positive finite number"}
+        with self.paper.pipeline.submission_lock:
+            position = next((item for item in self.portfolio.positions
+                             if item.symbol == name), None)
+            if position is None:
+                return {"closed": False, "code": "POSITION_NOT_FOUND",
+                        "error": f"no open position exists for {name}"}
+            quantity = position.quantity
+            direction = position.direction.value
+            try:
+                realized = self.paper.close(name, float(price),
+                                            timestamp=self.clock())
+            except (KeyError, ValueError) as error:
+                return {"closed": False, "code": "CLOSE_FAILED",
+                        "error": str(error)}
+        return {"closed": True, "symbol": name, "quantity": quantity,
+                "direction": direction, "requested_price": float(price),
+                "realized_pnl": realized, "reason": "MANUAL",
+                "execution": "PAPER"}
 
     def reconcile_orders(self) -> dict:
         """Compare the journal with the execution provider, read-only."""

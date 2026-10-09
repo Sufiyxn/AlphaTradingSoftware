@@ -281,6 +281,15 @@ recovers open orders after a restart.
   `200` success (`CANCELLED`, `ALREADY_CANCELLED`), `400` missing id, `404`
   `ORDER_NOT_FOUND`, `409` every other non-success.
 - `POST /api/orders/reconcile` (owner token) — `200` with the report; read-only.
+- `POST /api/positions/close` with `{"symbol": "AAPL", "price": 50.5}` (owner token) —
+  `200` `{closed, symbol, quantity, direction, requested_price, realized_pnl, reason:
+  "MANUAL", execution: "PAPER"}`, `400` `INVALID_SYMBOL`/`INVALID_PRICE` for a missing
+  symbol or a price that is absent, non-numeric, zero, negative or non-finite, `404`
+  `POSITION_NOT_FOUND` when nothing is open for that symbol **or** it was already closed,
+  `503` when owner controls are disabled. The price is always supplied by the caller —
+  never defaulted, marked or derived from the entry — and the close runs under the
+  submission lock with the same slippage, fee and journal accounting as an automatic or
+  signal exit.
 
 `describe()` is the JSON-ready, secret-free view used by the API and the audit trail.
 
@@ -340,3 +349,14 @@ executions, and its position served over HTTP after a restart; `test_journal_rep
 holds the fill export.
 
 Verification (Phase 10 checkpoint 3): `523 passed, 150 subtests`.
+
+`backend/tests/test_position_exits.py` (11 tests, 12 subtests) holds Phase 10 checkpoint 4: an
+owner-authorized close of one open paper position through `POST /api/positions/close`, proved by
+running the real accounting — the expected P&L recomputed from the position's weighted entry, the
+configured slippage and commission rather than asserted as a literal — plus exactly one `CLOSED`
+position event and one trade close per success, the entry order still `FILLED`, every impossible
+price (absent, zero, negative, non-numeric, boolean, `NaN`, `inf`) refused with the position
+untouched, unknown and already-closed symbols reported as `POSITION_NOT_FOUND`, the owner-token
+guard, the `503` when owner controls are disabled, and no credential in any response.
+
+Verification (Phase 10 checkpoint 4): `536 passed, 164 subtests`; HTTP smoke `50/50 checks`.
