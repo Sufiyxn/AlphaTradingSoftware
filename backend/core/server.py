@@ -56,6 +56,20 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                               "reason": market.get("reason"),
                               "quotes": runtime.market_data.get_latest(
                                   runtime.orchestrator.config.universe.symbols)}
+                elif path == "/api/candles":
+                    result = runtime.market_series.get(
+                        _one(query, "symbol") or "",
+                        timeframe=_one(query, "timeframe"),
+                        days=_float_param(query, "days")).payload()
+                elif path == "/api/watchlist":
+                    result = runtime.watchlist.snapshot().payload()
+                elif path == "/api/scanner":
+                    result = _scanner_payload(runtime)
+                elif path == "/api/decisions":
+                    limit = int(_one(query, "limit") or 100)
+                    if not 1 <= limit <= 500:
+                        raise ValueError("limit must be between 1 and 500")
+                    result = runtime.orchestrator.decisions(limit=limit)
                 elif path == "/api/positions":
                     result = _positions_payload(runtime)
                 elif path == "/api/orders":
@@ -296,6 +310,58 @@ def _positions_payload(runtime: ApplicationRuntime) -> dict:
 def _one(query, key):
     values = query.get(key, [])
     return values[0] if values else None
+
+
+def _float_param(query, key):
+    value = _one(query, key)
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a number")
+
+
+def _scanner_payload(runtime: ApplicationRuntime) -> dict:
+    """Per-symbol scan outcomes, including the rejections and their reasons.
+
+    The engine's candidates are the ranked ones, but a scanner that only
+    shows its winners cannot explain itself; every analyzed symbol is listed
+    with its opportunity (valid or not) and any data failure.
+    """
+    universe = runtime.orchestrator.config.universe
+    market = runtime.market_data.status
+    detailed = getattr(runtime.scanner, "scan_detailed", None)
+    if callable(detailed):
+        ranked, symbol_results = detailed(universe)
+        rows = [_scanner_row(item.symbol, item.opportunity, item.error)
+                for item in symbol_results]
+    else:
+        ranked, rows = tuple(runtime.scanner.scan(universe)), []
+    seen = {row["symbol"] for row in rows}
+    for opportunity in ranked:
+        if opportunity.symbol not in seen:
+            rows.append(_scanner_row(opportunity.symbol, opportunity, None))
+            seen.add(opportunity.symbol)
+    return {
+        "provider": market.get("provider"),
+        "provider_state": market.get("state"),
+        "market_session": market_session(runtime.clock()).state,
+        "eligible_count": len(ranked),
+        "symbol_count": len(rows),
+        "symbols": rows,
+    }
+
+
+def _scanner_row(symbol: str, opportunity, error: str | None) -> dict:
+    return {
+        "symbol": symbol,
+        "error": error,
+        "eligible": bool(opportunity is not None and opportunity.valid
+                         and opportunity.direction.value != "NONE"
+                         and opportunity.reward_risk_ratio is not None),
+        "opportunity": opportunity,
+    }
 
 
 def _date_param(query, key):

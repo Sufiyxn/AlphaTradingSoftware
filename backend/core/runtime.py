@@ -20,6 +20,7 @@ from backend.execution import (
     AdapterRegistry, ExecutionMode, ExecutionRouter, ExecutionSafetyGate, LocalPaperAdapter,
 )
 from backend.market_data import MarketDataBridge, MarketDataService, build_market_data_provider
+from backend.market_data.series import TIMEFRAME_INTERVALS_SECONDS, CandleSeriesService
 from backend.market_data.session import NEW_YORK, AssetClass, market_session, session_gate
 from backend.orders.provider import snapshot_from_adapter
 from backend.orchestrator import OrchestratorConfig, TradingOrchestrator
@@ -28,6 +29,7 @@ from backend.portfolio import Portfolio
 from backend.reporting import DailyReportingService, LocalMockNotifier, LogExportService, PerformanceService
 from backend.risk import RiskEngine
 from backend.scanner import MarketScannerService, StrategyAnalyzer, SymbolUniverse
+from backend.scanner.watchlist import WatchlistService
 from backend.strategies import StrategyEngine
 from backend.tradingview import TradingViewWebhookService
 
@@ -52,6 +54,16 @@ class ApplicationRuntime:
         self.market_data_bridge = MarketDataBridge(
             self.market_data, clock=self.clock,
             stale_after_seconds=self.config.market_data.stale_after_seconds)
+        # The chart and watchlist series build one provider per timeframe from
+        # the same settings the trading path uses - or reuse the injected
+        # provider in tests - so a timeframe the adapter does not advertise is
+        # refused instead of silently rewritten to one it does.
+        self.market_series = CandleSeriesService(
+            self.config.market_data, clock=self.clock,
+            stale_after_seconds=self.config.market_data.stale_after_seconds,
+            provider_factory=(None if market_data_provider is None
+                              else (lambda _settings,
+                                    _provider=self.market_data_provider: _provider)))
 
         self.portfolio = Portfolio(trading.paper_starting_cash, clock=self.clock)
         self.risk = RiskEngine(self.config.risk, clock=self.clock)
@@ -121,6 +133,12 @@ class ApplicationRuntime:
                 scan_interval=timedelta(seconds=trading.scan_interval_seconds),
                 history_lookback=timedelta(days=trading.history_lookback_days),
                 max_candidate_price=trading.max_candidate_price,
+                # Phase 12: candidates are refused when the newest bar is
+                # older than the configured freshness window, measured
+                # against the connected provider's candle spacing.
+                max_data_age=timedelta(seconds=self.config.market_data.stale_after_seconds),
+                data_interval=timedelta(seconds=TIMEFRAME_INTERVALS_SECONDS.get(
+                    self.config.market_data.timeframe, 60.0)),
             ),
             clock=self.clock,
             ai_analysis=(AIAnalysisService(LocalRuleBasedAnalysisProvider())
@@ -129,6 +147,8 @@ class ApplicationRuntime:
             session_submission=trading.session_submission,
             provider_extended_hours=self._provider_extended_hours,
         )
+        self.watchlist = WatchlistService(
+            self.market_series, self.orchestrator.config.universe.symbols)
         self.performance = PerformanceService(self.repository)
         self.notifier = LocalMockNotifier()
         self.daily_reports = DailyReportingService(self.repository, self.performance, self.notifier)

@@ -283,6 +283,25 @@ class SQLiteJournalRepository:
                symbol: str | None = None, limit: int | None = None) -> tuple[dict[str, Any], ...]:
         return self._filtered_rows("system_events", "timestamp", start, end, symbol, limit, ("context_json",))
 
+    def events_by_type(self, event_types, *, limit: int = 50) -> tuple[dict[str, Any], ...]:
+        """Most recent system events of the given types, newest first.
+
+        A decision ledger and a cycle counter both need "what did this engine
+        last do?" without reading the whole journal, and neither can be
+        reconstructed from a generic timestamp window: the callers ask for the
+        types they own and get the newest rows back.
+        """
+        types = tuple(str(event_type).strip() for event_type in event_types or ()
+                      if str(event_type).strip())
+        if not types:
+            return ()
+        bounded = max(1, min(int(limit), 1000))
+        placeholders = ",".join("?" for _ in types)
+        return self._query(
+            f"SELECT * FROM system_events WHERE event_type IN ({placeholders}) "
+            f"ORDER BY timestamp DESC, id DESC LIMIT ?",
+            [*types, bounded], ("context_json",))
+
     def errors(self, *, start: date | None = None, end: date | None = None,
                symbol: str | None = None, limit: int | None = None) -> tuple[dict[str, Any], ...]:
         return self._filtered_rows("errors", "timestamp", start, end, symbol, limit, ("context_json",))
@@ -402,6 +421,7 @@ class SQLiteJournalRepository:
         CREATE INDEX IF NOT EXISTS ix_fill_journal_order ON order_fill_journal(order_id);
         CREATE UNIQUE INDEX IF NOT EXISTS ux_fill_journal_provider ON order_fill_journal(connection_id,provider_instance_id,provider_fill_id) WHERE provider_fill_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS ix_events_timestamp ON system_events(timestamp);
+        CREATE INDEX IF NOT EXISTS ix_events_type ON system_events(event_type, timestamp);
         CREATE INDEX IF NOT EXISTS ix_errors_timestamp ON errors(timestamp);
         """
         with self._lock, self._connection:

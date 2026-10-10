@@ -26,6 +26,14 @@ from .provider import (
     ProviderUnavailableError,
 )
 from .registry import build_market_data_provider, is_implemented
+from .series import (
+    DEFAULT_TIMEFRAMES,
+    MAX_DAYS,
+    MAX_POINTS,
+    TIMEFRAME_INTERVALS_SECONDS,
+    CandleSeries,
+    CandleSeriesService,
+)
 from .service import MarketDataService
 from .session import (
     DEFAULT_SESSION_POLICY,
@@ -52,6 +60,7 @@ __all__ = [
     "BridgeReport",
     "CONNECTED",
     "DEFAULT_SESSION_POLICY",
+    "DEFAULT_TIMEFRAMES",
     "DataValidationError",
     "ERROR",
     "EXTENDED_HOURS_UNSUPPORTED",
@@ -62,6 +71,8 @@ __all__ = [
     "MarketDataProvider",
     "MarketDataProviderError",
     "MarketDataService",
+    "MAX_DAYS",
+    "MAX_POINTS",
     "NOT_CONFIGURED",
     "OUTSIDE_ALLOWED_WINDOW",
     "PRICED",
@@ -77,6 +88,7 @@ __all__ = [
     "SESSION_OK",
     "SESSION_POLICIES",
     "STALE",
+    "TIMEFRAME_INTERVALS_SECONDS",
     "SessionDecision",
     "SymbolValuation",
     "UNAVAILABLE",

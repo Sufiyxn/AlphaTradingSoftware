@@ -6,6 +6,7 @@ from .ranking import filter_and_rank
 from .service import MarketScanner, MarketScannerService
 from .strategy_analyzer import StrategyAnalyzer
 from .universe import SymbolUniverse
+from .watchlist import WatchlistRow, WatchlistService, WatchlistSnapshot
 
 __all__ = [
     "AnalysisContext",
@@ -18,5 +19,8 @@ __all__ = [
     "SymbolResult",
     "SymbolUniverse",
     "TemporaryTestAnalyzer",
+    "WatchlistRow",
+    "WatchlistService",
+    "WatchlistSnapshot",
     "filter_and_rank",
 ]

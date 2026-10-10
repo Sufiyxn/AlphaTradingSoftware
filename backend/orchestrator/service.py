@@ -20,10 +20,42 @@ from backend.scanner import MarketScanner
 from backend.strategies import StrategyEngine
 
 from .config import OrchestratorConfig
+from .decisions import (
+    ADVISORY,
+    APPROVED,
+    CANDIDATE,
+    CYCLE,
+    DATA_FRESHNESS,
+    DECISION_EVENT,
+    EXECUTION,
+    REJECTED,
+    RISK,
+    SCANNER,
+    SESSION,
+    SKIPPED,
+    STRATEGY,
+    DecisionLedger,
+    DecisionRecord,
+)
 from .models import CycleResult, OrchestratorSnapshot, OrchestratorStatus
 
 
 logger = logging.getLogger(__name__)
+
+
+def _latest_cycle(rows, event_type: str) -> int | None:
+    """The newest journaled cycle number for one marker event type."""
+    for row in rows:
+        if row.get("event_type") != event_type:
+            continue
+        context = row.get("context") or row.get("context_json") or {}
+        if not isinstance(context, dict):
+            continue
+        try:
+            return int(context.get("cycle"))
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 class TradingOrchestrator:
@@ -72,19 +104,39 @@ class TradingOrchestrator:
         self._candidates_rejected = 0
         self._approved = 0
         self._risk_rejected = 0
+        self._data_stale_rejected = 0
+        self._interrupted_cycles = 0
         self._errors: list[str] = []
         self._session_blocked = False
         self._session_reason: str | None = None
+        self._ledger = DecisionLedger()
+        #: Phase 12 checkpoint 1: resume where the journal says the engine
+        #: stopped, so a restart neither renumbers past cycles nor loses the
+        #: decisions the interrupted cycle already made.
+        self._recover_state()
 
     @property
     def state(self) -> OrchestratorSnapshot:
         with self._lock:
+            summary = self._ledger.summary()
             return OrchestratorSnapshot(
                 self._status, self._last_scan, self._cycle, self._candidates_found,
                 self._candidates_rejected, self._approved, self._risk_rejected,
                 len(self.portfolio.positions), tuple(self._errors),
                 self._session_blocked, self._session_reason,
+                self._data_stale_rejected, self._interrupted_cycles,
+                summary["total"], summary["latest"],
             )
+
+    def decisions(self, limit: int = 100) -> dict:
+        """Recent explainable decisions and the engine's summary.
+
+        The ledger is rebuilt from the journal on start, so this survives a
+        restart; ``summary`` counts what the ledger currently holds.
+        """
+        records = self._ledger.recent(limit)
+        return {"summary": self._ledger.summary(),
+                "decisions": [record.payload() for record in records]}
 
     def start(self) -> None:
         with self._lock:
@@ -207,18 +259,23 @@ class TradingOrchestrator:
                 {"cycle": cycle, "code": session.code, "reason": session.reason,
                  "policy": session.policy, "session_state": session.state,
                  "trading_day": session.is_trading_day})
+            decision = self._record_decision(
+                cycle, timestamp, None, SESSION, SKIPPED, (session.reason,),
+                {"code": session.code, "policy": session.policy,
+                 "session_state": session.state})
             with self._lock:
                 self._last_scan = timestamp
             self._journal_event(
                 "CYCLE_COMPLETED", f"Trading cycle {cycle} completed",
                 {"cycle": cycle, "candidates": 0, "approved": 0, "rejected": 0,
-                 "session_skipped": True})
+                 "session_skipped": True, "decisions": 1})
             return CycleResult(cycle, timestamp, (), (), 0, (),
-                               session_skipped=True)
+                               session_skipped=True, decisions=(decision,))
 
         errors: list[str] = []
         approved = []
         analyses = []
+        decisions: list[DecisionRecord] = []
         rejected = 0
         try:
             detailed_scan = getattr(self.scanner, "scan_detailed", None)
@@ -232,6 +289,9 @@ class TradingOrchestrator:
                         rejected += 1
                         self._record_error(message)
                         logger.warning(message)
+                        decisions.append(self._record_decision(
+                            cycle, timestamp, symbol_result.symbol, SCANNER, REJECTED,
+                            (symbol_result.error,), {"source": "scanner"}))
             else:
                 candidates = tuple(self.scanner.scan(self.config.universe))
         except Exception as error:
@@ -240,9 +300,16 @@ class TradingOrchestrator:
             self._record_error(message)
             candidates = ()
             errors.append(message)
+            rejected += 1
+            decisions.append(self._record_decision(
+                cycle, timestamp, None, SCANNER, REJECTED,
+                (f"scanner failed: {error}",), {"source": "scanner"}))
 
         for candidate in candidates:
             if self._halted():
+                decisions.append(self._record_decision(
+                    cycle, timestamp, None, CYCLE, SKIPPED,
+                    ("cycle halted before every candidate was evaluated",)))
                 break
             symbol = candidate.symbol
             self._journal_event("SCANNER_CANDIDATE", f"Scanned candidate for {symbol}",
@@ -252,12 +319,21 @@ class TradingOrchestrator:
                     rejected += 1
                     self._journal_event("CANDIDATE_REJECTED", f"Invalid scanner candidate for {symbol}",
                                         {"candidate": candidate})
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, CANDIDATE, REJECTED,
+                        tuple(candidate.reasons) or ("scanner candidate was not valid",),
+                        {"source": "scanner"}))
                     continue
                 if candidate.entry_price is None or candidate.entry_price >= self.config.max_candidate_price:
                     rejected += 1
                     self._journal_event("CANDIDATE_REJECTED", f"Candidate price is outside the approved range for {symbol}",
                                         {"entry_price": candidate.entry_price,
                                          "maximum_exclusive": self.config.max_candidate_price})
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, CANDIDATE, REJECTED,
+                        (f"entry price {candidate.entry_price} is outside the approved range",),
+                        {"entry_price": candidate.entry_price,
+                         "maximum_exclusive": self.config.max_candidate_price}))
                     continue
                 end = candidate.timestamp
                 bars = self.market_data.get_historical(symbol, end - self.config.history_lookback, end + timedelta(microseconds=1))
@@ -266,14 +342,42 @@ class TradingOrchestrator:
                 self._journal_event("MARKET_CONTEXT_RETRIEVED", f"Loaded strategy market context for {symbol}",
                                     {"cycle": cycle, "symbol": symbol,
                                      "bar_count": len(bars), "latest_bar": bars[-1]})
+                # Phase 12 checkpoint 1: a candidate is never evaluated, and
+                # certainly never submitted, against bars older than the
+                # freshness limit. The age is measured against the bar the
+                # provider actually returned - the engine does not guess a
+                # price it does not have.
+                age_seconds = (timestamp - bars[-1].timestamp).total_seconds()
+                age_limit = self.config.data_age_limit
+                if age_limit is not None and age_seconds > age_limit:
+                    rejected += 1
+                    with self._lock:
+                        self._data_stale_rejected += 1
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, DATA_FRESHNESS, REJECTED,
+                        (f"latest bar is {age_seconds:.0f}s old, beyond the "
+                         f"{age_limit:.0f}s freshness limit",),
+                        {"age_seconds": age_seconds,
+                         "limit_seconds": age_limit,
+                         "latest_bar": bars[-1].timestamp.isoformat()}))
+                    continue
                 signal = self.strategy.evaluate(bars)
                 self._journal_call("record_strategy_signal", signal)
                 setup = signal.setup
                 if setup is None:
                     rejected += 1
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, STRATEGY, REJECTED,
+                        (signal.reason or "strategy produced no trade setup",),
+                        {"strategy": signal.strategy_name}))
                     continue
                 if setup.entry_price >= self.config.max_candidate_price:
                     rejected += 1
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, STRATEGY, REJECTED,
+                        (f"setup entry price {setup.entry_price} is outside the approved range",),
+                        {"entry_price": setup.entry_price,
+                         "maximum_exclusive": self.config.max_candidate_price}))
                     continue
                 if setup.symbol.strip().upper() != symbol.strip().upper():
                     raise DataValidationError(f"strategy returned setup for unexpected symbol {setup.symbol}")
@@ -285,6 +389,9 @@ class TradingOrchestrator:
                         self._journal_call("record_ai_analysis", analysis)
                     except Exception as error:
                         self._record_error(f"{symbol}: advisory AI analysis unavailable: {error}", symbol=symbol)
+                        decisions.append(self._record_decision(
+                            cycle, timestamp, symbol, ADVISORY, SKIPPED,
+                            (f"advisory AI analysis unavailable: {error}",)))
                 if self._halted():
                     break
                 # One canonical path: the TradingPipeline evaluates risk
@@ -300,34 +407,65 @@ class TradingOrchestrator:
                     approved.append(result.trade)
                     with self._lock:
                         self._approved += 1
+                    risk_reasons = tuple(result.risk.reasons) if result.risk is not None else ()
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, RISK, APPROVED,
+                        risk_reasons or ("risk approved the submission",),
+                        {"quantity": getattr(result.risk, "quantity", None)}))
+                    order_id = getattr(result.order, "order_id", None)
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, EXECUTION, APPROVED,
+                        (f"paper order recorded for {result.trade.quantity:g} shares at "
+                         f"{result.trade.entry_price:g}",),
+                        {"order_id": order_id, "trade_id": getattr(result.trade, "order_id", None),
+                         "quantity": result.trade.quantity, "entry_price": result.trade.entry_price}))
                 elif result.risk is not None and not result.risk.approved:
                     rejected += 1
                     with self._lock:
                         self._risk_rejected += 1
+                    status = getattr(result.risk.status, "value", None)
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, RISK, REJECTED,
+                        tuple(result.risk.reasons) or ("risk engine rejected the submission",),
+                        {"status": status}))
                 elif result.order is not None:
                     rejected += 1
                     reason = f": {result.order.rejection_reason}" if result.order.rejection_reason else ""
                     message = f"{symbol}: paper execution did not fill order {result.order.order_id} ({result.order.status}{reason})"
                     errors.append(message)
                     self._record_error(message)
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, EXECUTION, REJECTED,
+                        (message,),
+                        {"order_id": result.order.order_id, "status": str(result.order.status)}))
                 else:
                     rejected += 1
                     detail = f": {result.reason}" if result.reason else ""
                     message = f"{symbol}: execution pipeline rejected the submission ({result.code}{detail})"
                     errors.append(message)
                     self._record_error(message)
+                    decisions.append(self._record_decision(
+                        cycle, timestamp, symbol, EXECUTION, REJECTED,
+                        (f"pipeline rejected the submission ({result.code}{detail})",),
+                        {"code": result.code}))
             except (DataValidationError, MarketDataProviderError, ValueError) as error:
                 rejected += 1
                 message = f"{symbol}: candidate processing failed: {error}"
                 errors.append(message)
                 self._record_error(message)
                 logger.warning(message)
+                decisions.append(self._record_decision(
+                    cycle, timestamp, symbol, CANDIDATE, REJECTED,
+                    (f"candidate processing failed: {error}",)))
             except Exception as error:
                 rejected += 1
                 message = f"{symbol}: candidate processing failed: {error}"
                 logger.exception(message)
                 errors.append(message)
                 self._record_error(message)
+                decisions.append(self._record_decision(
+                    cycle, timestamp, symbol, CANDIDATE, REJECTED,
+                    (f"candidate processing failed: {error}",)))
 
         with self._lock:
             self._last_scan = timestamp
@@ -335,8 +473,70 @@ class TradingOrchestrator:
             self._candidates_rejected += rejected
         self._journal_event("CYCLE_COMPLETED", f"Trading cycle {cycle} completed",
                             {"cycle": cycle, "candidates": len(candidates), "approved": len(approved),
-                             "rejected": rejected})
-        return CycleResult(cycle, timestamp, candidates, tuple(approved), rejected, tuple(errors), tuple(analyses))
+                             "rejected": rejected, "decisions": len(decisions)})
+        return CycleResult(cycle, timestamp, candidates, tuple(approved), rejected,
+                           tuple(errors), tuple(analyses), decisions=tuple(decisions))
+
+    def _record_decision(self, cycle: int, timestamp: datetime, symbol: str | None,
+                         stage: str, outcome: str, reasons,
+                         context: dict | None = None) -> DecisionRecord:
+        """One explainable decision: kept in the ledger and journaled."""
+        decision = self._ledger.record(cycle, timestamp, symbol, stage, outcome,
+                                       reasons, context)
+        detail = "; ".join(decision.reasons) if decision.reasons else decision.outcome
+        subject = decision.symbol or f"cycle {decision.cycle}"
+        self._journal_event(
+            DECISION_EVENT,
+            f"{subject}: {decision.stage} {decision.outcome} ({detail})",
+            {"cycle": decision.cycle, "stage": decision.stage,
+             "outcome": decision.outcome, "reasons": list(decision.reasons),
+             "context": decision.context},
+            symbol=decision.symbol)
+        return decision
+
+    def _recover_state(self) -> None:
+        """Rebuild cycle numbering and the decision ledger from the journal.
+
+        A restart must not renumber past cycles, must not silently lose a
+        cycle that started but never completed, and must not forget the
+        decisions already made. A journal that does not support the query is
+        treated as empty history, never as an error.
+        """
+        reader = getattr(self.journal, "events_by_type", None)
+        if not callable(reader):
+            return
+        interrupted: int | None = None
+        try:
+            markers = reader(("CYCLE_STARTED", "CYCLE_COMPLETED"), limit=100)
+        except Exception:
+            logger.exception("Unable to recover cycle progress from the journal")
+            markers = ()
+        if markers:
+            started = _latest_cycle(markers, "CYCLE_STARTED")
+            completed = _latest_cycle(markers, "CYCLE_COMPLETED")
+            if started is not None and (completed is None or started > completed):
+                interrupted = started
+            with self._lock:
+                self._cycle = max(started or 0, completed or 0)
+                if interrupted is not None:
+                    self._interrupted_cycles += 1
+        try:
+            rows = reader((DECISION_EVENT,), limit=self._ledger.capacity)
+        except Exception:
+            logger.exception("Unable to rebuild the decision ledger from the journal")
+        else:
+            if rows:
+                self._ledger.restore(rows)
+        if interrupted is not None:
+            stamp = self._clock()
+            self._journal_event(
+                "CYCLE_INTERRUPTED",
+                f"Trading cycle {interrupted} started but never completed before a restart",
+                {"cycle": interrupted})
+            self._record_decision(
+                interrupted, stamp, None, CYCLE, SKIPPED,
+                ("cycle started but never completed before a restart",),
+                {"recovered": True})
 
     def _halted(self) -> bool:
         with self._lock:
@@ -366,8 +566,12 @@ class TradingOrchestrator:
         except Exception:
             logger.exception("Unable to persist journal entry using %s", method)
 
-    def _journal_event(self, event: str, message: str, context: dict | None = None) -> None:
-        self._journal_call("record_event", self._clock(), event, message, context=context)
+    def _journal_event(self, event: str, message: str, context: dict | None = None,
+                       *, symbol: str | None = None) -> None:
+        kwargs = {"context": context}
+        if symbol:
+            kwargs["symbol"] = symbol
+        self._journal_call("record_event", self._clock(), event, message, **kwargs)
 
     def _record_error(self, message: str, *, symbol: str | None = None) -> None:
         with self._lock:

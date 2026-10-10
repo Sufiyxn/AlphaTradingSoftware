@@ -6,6 +6,8 @@ from backend.ai.models import SetupAnalysis
 from backend.paper_trading.models import PaperTradeRecord
 from backend.scanner.models import Opportunity
 
+from .decisions import DecisionRecord
+
 
 class OrchestratorStatus(str, Enum):
     RUNNING = "RUNNING"
@@ -30,6 +32,14 @@ class OrchestratorSnapshot:
     #: closed is a normal, expected state.
     session_blocked: bool = False
     session_reason: str | None = None
+    #: Phase 12: candidates the data-freshness gate refused before they
+    #: could reach the strategy. Stale bars are not an execution error.
+    data_stale_rejected: int = 0
+    #: Phase 12: cycles that started but never completed before a restart.
+    interrupted_cycles: int = 0
+    #: Phase 12: size of the explainable decision ledger and its latest entry.
+    decisions_total: int = 0
+    last_decision: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,3 +53,5 @@ class CycleResult:
     ai_analyses: tuple[SetupAnalysis, ...] = ()
     #: True when the market-session gate refused the scan for this cycle.
     session_skipped: bool = False
+    #: Phase 12: every decision this cycle made, in the order it made them.
+    decisions: tuple[DecisionRecord, ...] = ()
