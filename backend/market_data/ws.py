@@ -24,7 +24,21 @@ import ssl
 import struct
 from urllib.parse import urlparse
 
-GUID = "258EAFA5-E914-47DA-95CA-5AB0DC85B11A"
+# RFC 6455 section 1.3 magic value, quoted verbatim from the RFC (this exact
+# string, not a look-alike: the published test vector
+# key "dGhlIHNhbXBsZSBub25jZQ==" must hash to accept "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=").
+GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def expected_accept(key: str) -> str:
+    """The ``Sec-WebSocket-Accept`` value RFC 6455 section 1.3 defines.
+
+    Single source of truth for the client's handshake validation *and* the
+    loopback fixture server, so tests cannot pass by merely agreeing with each
+    other. Pinned to the RFC's published test vector in the test suite.
+    """
+    return base64.b64encode(
+        hashlib.sha1((key + GUID).encode("ascii")).digest()).decode("ascii")
 
 OP_CONT = 0x0
 OP_TEXT = 0x1
@@ -175,8 +189,7 @@ class WebSocketClient:
             raise WebSocketHandshakeError("the server did not answer with Upgrade: websocket")
         if "upgrade" not in received.get("connection", "").lower():
             raise WebSocketHandshakeError("the server did not answer with Connection: Upgrade")
-        expected = base64.b64encode(
-            hashlib.sha1((key + GUID).encode("ascii")).digest()).decode("ascii")
+        expected = expected_accept(key)
         if received.get("sec-websocket-accept", "") != expected:
             raise WebSocketHandshakeError(
                 "the Sec-WebSocket-Accept header does not match the request key")

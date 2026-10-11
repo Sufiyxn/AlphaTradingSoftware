@@ -34,6 +34,7 @@ from backend.market_data.stream import (
     build_market_stream,
     stream_configuration,
 )
+from backend.market_data.ws import expected_accept
 from backend.testing.market_data import MockMarketDataProvider
 from backend.testing.ws_server import WebSocketTestServer
 
@@ -162,6 +163,23 @@ class AlpacaProtocolTests(unittest.TestCase):
         subscription = self.protocol.interpret(
             '[{"T":"error","code":4006,"msg":"subscription limit exceeded"}]')[0]
         self.assertEqual(subscription.status, "SUBSCRIPTION_FAILED")
+
+
+# -- RFC 6455 conformance, pinned to an external authority -------------------
+class RFC6455ConformanceTests(unittest.TestCase):
+    """The handshake must satisfy the RFC, not merely agree with our fixture.
+
+    A single wrong constant shared by client *and* loopback fixture passes
+    every local test while failing against every real provider - this is
+    exactly what happened against Alpaca (a shifted transcription of the RFC
+    magic GUID). These values come from RFC 6455 section 1.3's published test
+    vector, so only the RFC can bless them.
+    """
+
+    def test_the_accept_calculation_reproduces_the_published_rfc_vector(self):
+        self.assertEqual(
+            expected_accept("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
 
 
 # -- stream against a real loopback socket ----------------------------------

@@ -12,14 +12,19 @@ and subscription failure paths are proven deterministically.
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import socket
 import struct
 import threading
 
-from backend.market_data.ws import GUID, OP_CLOSE, OP_CONT, OP_PING, OP_PONG, OP_TEXT
+from backend.market_data.ws import (
+    OP_CLOSE,
+    OP_CONT,
+    OP_PING,
+    OP_PONG,
+    OP_TEXT,
+    expected_accept,
+)
 
 _HANDSHAKE_LIMIT = 64 * 1024
 
@@ -216,8 +221,7 @@ class WebSocketTestServer:
             if request is None:
                 return
             key = request.get("sec-websocket-key", "")
-            accept = self._accept_key or base64.b64encode(
-                hashlib.sha1((key + GUID).encode("ascii")).digest()).decode("ascii")
+            accept = self._accept_key or expected_accept(key)
             response = (
                 f"{self._status_line}\r\n"
                 "Upgrade: websocket\r\n"
