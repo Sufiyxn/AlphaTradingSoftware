@@ -269,18 +269,21 @@ def _market_data_settings(env: Mapping[str, str]) -> MarketDataSettings:
     defaults = MarketDataSettings()
     provider = _normalise_provider(_get(env, "MARKET_DATA_PROVIDER"))
     provider_key = {"polygon": "POLYGON_API_KEY",
-                    "alphavantage": "ALPHAVANTAGE_API_KEY"}.get(provider)
+                    "alphavantage": "ALPHAVANTAGE_API_KEY",
+                    "alpaca": "ALPACA_API_KEY"}.get(provider)
     if provider_key:
         api_key = _get(env, provider_key) or _get(env, "MARKET_DATA_API_KEY")
     else:
         api_key = (_get(env, "POLYGON_API_KEY")
                    or _get(env, "ALPHAVANTAGE_API_KEY")
                    or _get(env, "MARKET_DATA_API_KEY"))
+    api_secret = (_get(env, "ALPACA_API_SECRET")
+                  if provider == "alpaca" else None) or _get(env, "MARKET_DATA_API_SECRET")
     return MarketDataSettings(
         provider=provider,
         base_url=_get(env, "MARKET_DATA_BASE_URL"),
         api_key=api_key,
-        api_secret=_get(env, "MARKET_DATA_API_SECRET"),
+        api_secret=api_secret,
         plan=_get(env, "MARKET_DATA_PLAN"),
         account_id=_get(env, "MARKET_DATA_ACCOUNT_ID"),
         timeframe=_get(env, "MARKET_DATA_TIMEFRAME", "1min") or "1min",
@@ -292,6 +295,9 @@ def _market_data_settings(env: Mapping[str, str]) -> MarketDataSettings:
             _get(env, "MARKET_DATA_TIMEOUT_SECONDS"),
             default=defaults.timeout_seconds,
             name="MARKET_DATA_TIMEOUT_SECONDS"),
+        stream=parse_bool(_get(env, "MARKET_DATA_STREAM"), default=defaults.stream),
+        stream_feed=(_get(env, "MARKET_DATA_STREAM_FEED") or "").strip().lower(),
+        stream_url=_get(env, "MARKET_DATA_STREAM_URL"),
     )
 
 

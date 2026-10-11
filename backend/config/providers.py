@@ -14,6 +14,10 @@ from .catalog import (
     descriptor,
 )
 
+#: Which settings attribute supplies each required credential name. Anything
+#: not listed here comes from ``api_key`` (the common single-key provider).
+_CREDENTIAL_SOURCES = {"ALPACA_API_SECRET": "api_secret"}
+
 
 def _missing(descriptor_id: str, catalog: dict, field_names: tuple[str, ...],
              values: dict[str, str | None]) -> tuple[str, ...]:
@@ -31,6 +35,14 @@ class MarketDataSettings:
     timeframe: str = "1min"
     stale_after_seconds: float = 300.0
     timeout_seconds: float = 10.0
+    #: Live streaming: ``MARKET_DATA_STREAM`` (default on), ``MARKET_DATA_STREAM_FEED``
+    #: selects the entitlement (e.g. Alpaca ``iex``/``sip``, Polygon
+    #: ``realtime``/``delayed``), ``MARKET_DATA_STREAM_URL`` overrides the
+    #: socket endpoint. Streaming only ever starts for a provider that ships a
+    #: streaming adapter *and* has credentials; otherwise it reports why not.
+    stream: bool = True
+    stream_feed: str = ""
+    stream_url: str | None = None
 
     def __post_init__(self) -> None:
         if self.stale_after_seconds <= 0:
@@ -53,20 +65,28 @@ class MarketDataSettings:
         return MARKET_DATA_CATALOG.get(self.provider)
 
     @property
+    def credential_values(self) -> dict[str, str | None]:
+        found = self.entry
+        if found is None:
+            return {}
+        return {name: getattr(self, _CREDENTIAL_SOURCES.get(name, "api_key"), None)
+                for name in found.required_credentials}
+
+    @property
     def configured(self) -> bool:
         found = self.entry
         if found is None:
             return False
-        values = {name: self.api_key for name in found.required_credentials}
-        return not _missing(self.provider, MARKET_DATA_CATALOG, found.required_credentials, values)
+        return not _missing(self.provider, MARKET_DATA_CATALOG,
+                            found.required_credentials, self.credential_values)
 
     @property
     def missing_credentials(self) -> tuple[str, ...]:
         found = self.entry
         if found is None:
             return ()
-        values = {name: self.api_key for name in found.required_credentials}
-        return _missing(self.provider, MARKET_DATA_CATALOG, found.required_credentials, values)
+        return _missing(self.provider, MARKET_DATA_CATALOG,
+                        found.required_credentials, self.credential_values)
 
     @property
     def implemented(self) -> bool:
@@ -110,6 +130,9 @@ class MarketDataSettings:
             "timeframe": self.timeframe,
             "stale_after_seconds": self.stale_after_seconds,
             "timeout_seconds": self.timeout_seconds,
+            "stream_enabled": self.stream,
+            "stream_feed": self.stream_feed or None,
+            "stream_endpoint_configured": bool(self.stream_url),
             "markets": list(found.markets) if found else [],
             "timeframes": list(found.timeframes) if found else [],
             "capabilities": list(found.capabilities) if found else [],

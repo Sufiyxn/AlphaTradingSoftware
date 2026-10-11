@@ -22,12 +22,13 @@ class MarketDataRegistryTests(unittest.TestCase):
         self.assertEqual(provider.symbols, ())
 
     def test_catalog_vendor_with_credentials_resolves_to_a_real_adapter(self):
-        for provider_id in MARKET_DATA_CATALOG:
+        for provider_id, descriptor in MARKET_DATA_CATALOG.items():
             with self.subTest(provider_id=provider_id):
+                # Supply exactly the credentials this vendor declares, so a
+                # newly catalogued provider is held to the same standard.
                 settings = load_config(env={
                     "MARKET_DATA_PROVIDER": provider_id,
-                    "POLYGON_API_KEY": "present",
-                    "ALPHAVANTAGE_API_KEY": "present",
+                    **{name: "present" for name in descriptor.required_credentials},
                 }).market_data
                 built = build_market_data_provider(settings)
                 self.assertNotIsInstance(built, UnconfiguredMarketDataProvider)

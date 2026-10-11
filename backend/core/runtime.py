@@ -19,7 +19,13 @@ from backend.database import SQLiteJournalRepository
 from backend.execution import (
     AdapterRegistry, ExecutionMode, ExecutionRouter, ExecutionSafetyGate, LocalPaperAdapter,
 )
-from backend.market_data import MarketDataBridge, MarketDataService, build_market_data_provider
+from backend.market_data import (
+    MarketDataBridge,
+    MarketDataService,
+    build_market_data_provider,
+    build_market_stream,
+    stream_configuration,
+)
 from backend.market_data.series import TIMEFRAME_INTERVALS_SECONDS, CandleSeriesService
 from backend.market_data.session import NEW_YORK, AssetClass, market_session, session_gate
 from backend.orders.provider import snapshot_from_adapter
@@ -117,6 +123,26 @@ class ApplicationRuntime:
             portfolio=self.portfolio, engine=self.paper, repository=self.repository,
             starting_cash=trading.paper_starting_cash, clock=self.clock)
 
+        # Live streaming: one provider socket whose normalized events feed every
+        # consumer through MarketDataService (charts, watchlist, scanner,
+        # valuation, risk). The object is built here but never *started* here:
+        # only the real application process opens the socket, so a test that
+        # injects a fixture provider can never reach a vendor endpoint. When the
+        # provider has no streaming adapter or no credentials, this stays None
+        # and /api/status explains why via stream_configuration() instead of
+        # pretending a feed is live.
+        self.market_stream = (
+            None if market_data_provider is not None
+            else build_market_stream(
+                self.config.market_data,
+                symbols=tuple(dict.fromkeys([
+                    *trading.universe,
+                    *(position.symbol for position in self.portfolio.positions)])),
+                clock=self.clock,
+                stale_after_seconds=self.config.market_data.stale_after_seconds))
+        if self.market_stream is not None:
+            self.market_data.attach_stream(self.market_stream)
+
         self.strategy = StrategyEngine(config=self.config.strategy)
         self.scanner = MarketScannerService(
             self.market_data,
@@ -194,6 +220,28 @@ class ApplicationRuntime:
     @property
     def mode(self) -> str:
         return self.config.trading.selection.effective.value
+
+    # --------------------------------------------------------------- streaming
+    def start_market_stream(self) -> bool:
+        """Open the provider WebSocket. Returns False when there is nothing to run.
+
+        This is called by the application entry point, not by construction, so
+        a test runtime with fixture data never opens a vendor socket.
+        """
+        if getattr(self, "market_stream", None) is None:
+            return False
+        self.market_stream.start()
+        return True
+
+    def market_stream_status(self) -> dict:
+        """Honest stream state: a live snapshot, or exactly why there is none."""
+        stream = getattr(self, "market_stream", None)
+        if stream is not None and stream.running:
+            return stream.snapshot()
+        info = stream_configuration(self.config.market_data)
+        if stream is not None and not info.get("reason"):
+            info["reason"] = "the stream is configured but has not been started"
+        return info
 
     # ----------------------------------------------------------- order lifecycle
     @property
@@ -361,6 +409,7 @@ class ApplicationRuntime:
             "market_data_availability_reason": availability["reason"],
             "market_data_last_quote_at": availability["last_quote_at"],
             "market_data_stale_after_seconds": availability["stale_after_seconds"],
+            "market_data_stream": self.market_stream_status(),
             "valuation_status": snapshot.valuation_status,
             "execution_adapter": self.execution.identify(),
             "readiness": self.connections.readiness()["status"],
@@ -378,6 +427,11 @@ class ApplicationRuntime:
     def close(self) -> None:
         self._report_stop.set()
         self._market_stop.set()
+        if getattr(self, "market_stream", None) is not None:
+            try:
+                self.market_stream.stop()
+            except Exception:
+                logging.getLogger(__name__).exception("Market-data stream shutdown failed")
         self.orchestrator.stop()
         self._report_thread.join(timeout=1)
         self._market_thread.join(timeout=1)

@@ -54,6 +54,7 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     result = {"provider": market.get("provider"),
                               "state": market.get("state"),
                               "reason": market.get("reason"),
+                              "stream": runtime.market_stream_status(),
                               "quotes": runtime.market_data.get_latest(
                                   runtime.orchestrator.config.universe.symbols)}
                 elif path == "/api/candles":
@@ -389,7 +390,12 @@ def main() -> None:
     server = create_server(runtime, settings.host, settings.port)
     if runtime.owner_controls is not None:
         runtime.owner_controls._shutdown = server.shutdown
+    started = runtime.start_market_stream()
+    stream = runtime.market_stream_status()
     print(f"Alpha Trading PAPER API listening at http://{settings.host}:{settings.port}/api/health")
+    print(f"Market-data stream: {stream.get('state')}"
+          + (f" - {stream.get('reason')}" if stream.get("reason") else "")
+          + ("" if started else " (not started)"))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

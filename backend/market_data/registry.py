@@ -11,6 +11,7 @@ from collections.abc import Callable
 from backend.config.catalog import descriptor
 
 from .alphavantage import AlphaVantageMarketDataProvider
+from .alpaca_data import AlpacaMarketDataProvider
 from .polygon import PolygonMarketDataProvider
 from .provider import MarketDataProvider
 from .unconfigured import UnconfiguredMarketDataProvider
@@ -38,9 +39,17 @@ def _build_alphavantage(settings, *, transport=None, clock=None) -> MarketDataPr
     return AlphaVantageMarketDataProvider(**_vendor_kwargs(settings, transport, clock))
 
 
+def _build_alpaca(settings, *, transport=None, clock=None) -> MarketDataProvider:
+    kwargs = _vendor_kwargs(settings, transport, clock)
+    kwargs["api_secret"] = getattr(settings, "api_secret", None)
+    kwargs["feed"] = getattr(settings, "stream_feed", "") or "iex"
+    return AlpacaMarketDataProvider(**kwargs)
+
+
 IMPLEMENTED: dict[str, MarketDataBuilder] = {
     "polygon": _build_polygon,
     "alphavantage": _build_alphavantage,
+    "alpaca": _build_alpaca,
 }
 
 

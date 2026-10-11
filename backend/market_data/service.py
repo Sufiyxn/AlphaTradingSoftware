@@ -9,12 +9,22 @@ from .validation import DataValidationError, normalize_bar, normalize_quote
 class MarketDataService:
     """Validate provider output before exposing normalized market data to consumers."""
 
-    def __init__(self, provider: MarketDataProvider):
+    def __init__(self, provider: MarketDataProvider, stream=None):
         self._provider = provider
+        self._stream = stream
 
     @property
     def configured(self) -> bool:
         return bool(getattr(self._provider, "is_configured", True))
+
+    @property
+    def stream(self):
+        """The live-quote stream attached to this service, if one is running."""
+        return self._stream
+
+    def attach_stream(self, stream) -> None:
+        """Attach (or replace) the streaming source used by ``get_latest``."""
+        self._stream = stream
 
     @property
     def provider_id(self) -> str:
@@ -113,22 +123,38 @@ class MarketDataService:
         return bars
 
     def get_latest(self, symbols: Sequence[str]) -> tuple[Quote, ...]:
+        """Latest quotes, preferring live stream events over REST snapshots.
+
+        The stream and the REST adapter are two views of the same provider:
+        whatever arrived on the live socket wins for that symbol (it is newer),
+        and REST fills the symbols the stream has not seen yet. Every returned
+        quote - from either path - has already been validated by
+        ``normalize_quote``, so a consumer can never observe an unvalidated
+        price. Symbols nobody answered stay absent; they are never invented.
+        """
         requested = tuple(dict.fromkeys(symbol.strip().upper() for symbol in symbols if isinstance(symbol, str) and symbol.strip()))
         if not requested:
             raise DataValidationError("at least one non-empty symbol is required")
-        try:
-            quotes = tuple(normalize_quote(quote) for quote in self._provider.get_latest(requested))
-        except DataValidationError:
-            raise
-        except MarketDataProviderError:
-            raise
-        except Exception as error:
-            raise MarketDataProviderError("latest data request failed") from error
-        returned: set[str] = set()
-        for quote in quotes:
-            if quote.symbol not in requested:
-                raise DataValidationError(f"provider returned unexpected symbol {quote.symbol}")
-            if quote.symbol in returned:
-                raise DataValidationError(f"provider returned duplicate quote for {quote.symbol}")
-            returned.add(quote.symbol)
-        return quotes
+        streamed: dict[str, Quote] = self._stream.latest(requested) if self._stream else {}
+        rest: tuple[Quote, ...] = ()
+        missing = [symbol for symbol in requested if symbol not in streamed]
+        if missing:
+            try:
+                rest = tuple(normalize_quote(quote) for quote in self._provider.get_latest(missing))
+            except DataValidationError:
+                raise
+            except MarketDataProviderError:
+                raise
+            except Exception as error:
+                raise MarketDataProviderError("latest data request failed") from error
+            returned: set[str] = set()
+            for quote in rest:
+                if quote.symbol not in requested:
+                    raise DataValidationError(f"provider returned unexpected symbol {quote.symbol}")
+                if quote.symbol in returned:
+                    raise DataValidationError(f"provider returned duplicate quote for {quote.symbol}")
+                returned.add(quote.symbol)
+        merged = dict(streamed)
+        for quote in rest:
+            merged.setdefault(quote.symbol, quote)
+        return tuple(merged[symbol] for symbol in requested if symbol in merged)

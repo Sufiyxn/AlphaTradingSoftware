@@ -35,6 +35,14 @@ from .series import (
     CandleSeriesService,
 )
 from .service import MarketDataService
+from .stream import (
+    MarketDataStream,
+    AlpacaStreamProtocol,
+    PolygonStreamProtocol,
+    build_market_stream,
+    protocol_for,
+    stream_configuration,
+)
 from .session import (
     DEFAULT_SESSION_POLICY,
     EXTENDED_HOURS_UNSUPPORTED,
@@ -55,6 +63,7 @@ from .unconfigured import UnconfiguredMarketDataProvider
 from .validation import DataValidationError, normalize_bar, normalize_quote
 
 __all__ = [
+    "AlpacaStreamProtocol",
     "AssetClass",
     "Bar",
     "BridgeReport",
@@ -68,6 +77,7 @@ __all__ = [
     "HttpTransport",
     "MARKET_CLOSED",
     "MarketDataBridge",
+    "MarketDataStream",
     "MarketDataProvider",
     "MarketDataProviderError",
     "MarketDataService",
@@ -76,6 +86,7 @@ __all__ = [
     "NOT_CONFIGURED",
     "OUTSIDE_ALLOWED_WINDOW",
     "PRICED",
+    "PolygonStreamProtocol",
     "ProviderAuthenticationError",
     "ProviderConnectionError",
     "ProviderNoDataError",
@@ -98,10 +109,13 @@ __all__ = [
     "UrllibTransport",
     "asset_class_for_symbol",
     "build_market_data_provider",
+    "build_market_stream",
     "is_implemented",
     "market_session",
     "normalize_bar",
     "normalize_quote",
     "normalize_session_policy",
+    "protocol_for",
     "session_gate",
+    "stream_configuration",
 ]

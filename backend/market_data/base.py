@@ -98,6 +98,10 @@ class VendorMarketDataProvider:
     def _probe(self) -> str:
         raise NotImplementedError
 
+    def _extra_headers(self) -> Mapping[str, str]:
+        """Headers every request carries (e.g. header-authenticated vendors)."""
+        return {}
+
     def _fetch_latest(self, symbols: Sequence[str]) -> Sequence[Quote]:
         raise NotImplementedError
 
@@ -123,7 +127,8 @@ class VendorMarketDataProvider:
         try:
             response = self._transport.get(
                 full_url,
-                headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+                headers={"Accept": "application/json", "User-Agent": USER_AGENT,
+                         **dict(self._extra_headers())},
                 timeout=self.timeout_seconds,
             )
         except ProviderTimeoutError:
@@ -210,9 +215,9 @@ class VendorMarketDataProvider:
     def _redact(self, text: str) -> str:
         if not text:
             return ""
-        key = self._api_key
-        if key and len(key) >= 6 and key in text:
-            text = text.replace(key, "***")
+        for secret in (self._api_key, getattr(self, "_api_secret", None)):
+            if secret and len(secret) >= 6 and secret in text:
+                text = text.replace(secret, "***")
         if "apiKey=" in text or "api_key=" in text or "apikey=" in text.lower():
             parts = text.split()
             text = " ".join(_strip_query_secret(part) for part in parts)
@@ -293,6 +298,28 @@ def epoch_to_utc(value: Any) -> datetime:
     if not 1990 <= moment.year <= 2100:
         raise ValueError("timestamp is outside a plausible market-data range")
     return moment
+
+
+def rfc3339_to_utc(value: Any) -> datetime:
+    """Parse an RFC 3339 timestamp (including nanoseconds) into UTC."""
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    head, sep, fraction = text.partition(".")
+    if sep:
+        tail, offset = fraction, ""
+        for index, char in enumerate(fraction):
+            if char in "+-":
+                offset = fraction[index:]
+                tail = fraction[:index]
+                break
+        text = f"{head}.{tail[:6]}{offset}"
+    moment = datetime.fromisoformat(text)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    if not 1990 <= moment.year <= 2100:
+        raise ValueError("timestamp is outside a plausible market-data range")
+    return moment.astimezone(timezone.utc)
 
 
 def require_number(value: Any, field: str) -> float:

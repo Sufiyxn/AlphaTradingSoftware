@@ -50,6 +50,16 @@ MARKET_DATA_CATALOG: dict[str, IntegrationDescriptor] = {
             capabilities=("historical_ohlcv", "latest_quotes", "symbol_lookup", "read_only"),
             secret_fields=("ALPHAVANTAGE_API_KEY",),
         ),
+        IntegrationDescriptor(
+            id="alpaca", label="Alpaca", kind="market_data", implemented=True,
+            required_credentials=("ALPACA_API_KEY", "ALPACA_API_SECRET"),
+            optional_fields=("MARKET_DATA_STREAM_FEED", "MARKET_DATA_BASE_URL"),
+            markets=("US_EQUITIES",),
+            timeframes=("1min", "5min", "15min", "1h", "1day"),
+            capabilities=("historical_ohlcv", "latest_quotes", "symbol_lookup",
+                          "read_only", "realtime_stream"),
+            secret_fields=("ALPACA_API_KEY", "ALPACA_API_SECRET"),
+        ),
     )
 }
 
