@@ -193,10 +193,19 @@ def run_checks(page, checks: Checks, token: str, console_errors: list[str],
                      for state in ("NOT_CONFIGURED", "CONNECTED", "READY", "OFF",
                                    "RECONNECTING", "AUTH_FAILED", "ERROR")),
                  stream_panel.splitlines()[0] if stream_panel else "empty")
-    checks.check("the Markets page explains a disconnected feed instead of pretending",
-                 "no market-data provider" in stream_panel
-                 or "not been started" in stream_panel
-                 or "CONNECTED" in stream_panel)
+    # The UI must show the backend's own explanation verbatim - no invented
+    # comfort text and no upgraded claim when the socket is not connected.
+    backend_stream = page.evaluate(
+        "async () => (await fetch('/api/status')).json()").get("market_data_stream") or {}
+    reason = backend_stream.get("reason") or ""
+    checks.check("the Markets page explains the feed state with the backend's own reason",
+                 bool(reason) and reason in stream_panel, reason[:70])
+    state = backend_stream.get("state")
+    checks.check("the displayed state token matches the backend's state",
+                 bool(state) and state in stream_panel, state)
+    if state != "CONNECTED":
+        checks.check("an unconnected feed is never shown as CONNECTED",
+                     "CONNECTED" not in stream_panel, str(state))
 
     page.goto(f"{FRONTEND}/#/portfolio", wait_until="domcontentloaded")
     page.wait_for_selector("h1", timeout=15000)
