@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   PAPER_NOTICE,
   buildLedger,
@@ -6,6 +6,9 @@ import {
   describeReadiness,
 } from './demo'
 import type { ActivityRow, ApiOrder, LedgerStep, OrderView, ReadinessView } from './demo'
+import type { PanelLoad } from './types'
+
+export type SignalDeskSnapshot = { orders: OrderView[]; ledger: LedgerStep[] }
 
 type StatusSlice = {
   mode?: string | null
@@ -32,12 +35,14 @@ const usd = (n?: number | null) =>
   n == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 const time = (s?: string | null) => (s ? new Date(s).toLocaleString() : '—')
 
-export default function SignalDesk({ status }: { status?: StatusSlice }) {
+export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; onLoad?: (result: PanelLoad<SignalDeskSnapshot>) => void }) {
   const [orders, setOrders] = useState<OrderView[]>([])
   const [ledger, setLedger] = useState<LedgerStep[]>([])
   const [connections, setConnections] = useState<ConnectionsPayload | null>(null)
   const [positions, setPositions] = useState<PositionSlice[]>([])
   const [error, setError] = useState('')
+  const onLoadRef = useRef(onLoad)
+  useEffect(() => { onLoadRef.current = onLoad })
 
   const refresh = useCallback(async () => {
     try {
@@ -54,13 +59,18 @@ export default function SignalDesk({ status }: { status?: StatusSlice }) {
         await Promise.all(responses.map((response) => response.json())) as [
           OrdersPayload, ActivityPayload, ConnectionsPayload, PositionsPayload,
         ]
-      setOrders(buildOrderViews(orderPayload.orders ?? []))
-      setLedger(buildLedger(activityPayload.events ?? []))
+      const orderViews = buildOrderViews(orderPayload.orders ?? [])
+      const ledgerSteps = buildLedger(activityPayload.events ?? [])
+      setOrders(orderViews)
+      setLedger(ledgerSteps)
       setConnections(connectionPayload)
       setPositions(positionPayload.positions ?? [])
       setError('')
+      onLoadRef.current?.({ data: { orders: orderViews, ledger: ledgerSteps }, error: '' })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'API unavailable')
+      const message = cause instanceof Error ? cause.message : 'API unavailable'
+      setError(message)
+      onLoadRef.current?.({ data: null, error: message })
     }
   }, [])
 

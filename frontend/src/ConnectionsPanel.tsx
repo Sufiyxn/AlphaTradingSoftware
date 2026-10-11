@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { PanelLoad } from './types'
 
 type TestStatus = { status: string; tested_at: string | null; error?: string | null; message?: string }
 type Section = {
@@ -31,18 +32,35 @@ type ExecutionConnection = {
 }
 type ExecutionProvider = { provider_id?: string; label?: string; implemented?: boolean; supported_modes?: string[] }
 type ExecutionGate = { paper_allowed?: boolean; live_allowed?: boolean; kill_switch_engaged?: boolean; manual_stop_engaged?: boolean }
-type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; tradingview: Section; execution_connections: Section }
+export type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; tradingview: Section; execution_connections: Section }
 type Check = { key: string; label: string; status: string; passed: boolean; detail: string }
-type Readiness = { status: string; live_mode: string; checks: Check[]; blockers: string[]; performance_qualification: string; measured_win_rate: number; evaluation_trades: number }
+export type Readiness = { status: string; live_mode: string; checks: Check[]; blockers: string[]; performance_qualification: string; measured_win_rate: number; evaluation_trades: number }
 
-export default function ConnectionsPanel({ token }: { token: string }) {
+export type ConnectionsSnapshot = { connections: Connections | null; readiness: Readiness | null }
+
+export default function ConnectionsPanel({ token, onLoad }: { token: string; onLoad?: (result: PanelLoad<ConnectionsSnapshot>) => void }) {
   const [connections, setConnections] = useState<Connections | null>(null)
   const [readiness, setReadiness] = useState<Readiness | null>(null)
   const [notice, setNotice] = useState('')
   const [pending, setPending] = useState('')
+  const onLoadRef = useRef(onLoad)
+  useEffect(() => { onLoadRef.current = onLoad })
   const refresh = async () => {
-    const [c, r] = await Promise.all([fetch('/api/connections'), fetch('/api/readiness')])
-    if (c.ok && r.ok) { setConnections(await c.json()); setReadiness(await r.json()) }
+    try {
+      const [c, r] = await Promise.all([fetch('/api/connections'), fetch('/api/readiness')])
+      if (c.ok && r.ok) {
+        const connectionPayload = await c.json() as Connections
+        const readinessPayload = await r.json() as Readiness
+        setConnections(connectionPayload)
+        setReadiness(readinessPayload)
+        onLoadRef.current?.({ data: { connections: connectionPayload, readiness: readinessPayload }, error: '' })
+      } else {
+        const message = c.ok ? 'readiness records are unavailable' : 'connection records are unavailable'
+        onLoadRef.current?.({ data: null, error: message })
+      }
+    } catch {
+      onLoadRef.current?.({ data: null, error: 'connection records are unavailable' })
+    }
   }
   useEffect(() => { void refresh() }, [])
   const test = async (section: string) => {

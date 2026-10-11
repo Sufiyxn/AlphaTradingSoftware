@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { PanelLoad } from './types'
 
 type WatchlistRow = {
   symbol: string
@@ -18,7 +19,7 @@ type WatchlistRow = {
   freshness: string | null
   age_seconds: number | null
 }
-type WatchlistPayload = {
+export type WatchlistPayload = {
   state: string
   reason: string | null
   provider: string | null
@@ -34,9 +35,11 @@ const usd = (value: number | null) =>
 const num = (value: number | null, digits = 2) =>
   value == null ? '—' : value.toFixed(digits)
 
-export default function WatchlistPanel({ onSelect }: { onSelect: (symbol: string) => void }) {
+export default function WatchlistPanel({ onSelect, onLoad }: { onSelect: (symbol: string) => void; onLoad?: (result: PanelLoad<WatchlistPayload>) => void }) {
   const [payload, setPayload] = useState<WatchlistPayload | null>(null)
   const [error, setError] = useState('')
+  const onLoadRef = useRef(onLoad)
+  useEffect(() => { onLoadRef.current = onLoad })
 
   const refresh = useCallback(async () => {
     try {
@@ -45,8 +48,11 @@ export default function WatchlistPanel({ onSelect }: { onSelect: (symbol: string
       if (!response.ok) throw new Error(body.error || 'Watchlist is unavailable')
       setPayload(body as WatchlistPayload)
       setError('')
+      onLoadRef.current?.({ data: body as WatchlistPayload, error: '' })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Watchlist is unavailable')
+      const message = cause instanceof Error ? cause.message : 'Watchlist is unavailable'
+      setError(message)
+      onLoadRef.current?.({ data: null, error: message })
     }
   }, [])
 

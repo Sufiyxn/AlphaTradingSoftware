@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { PanelLoad } from './types'
 
 type Decision = {
   cycle: number
@@ -9,7 +10,7 @@ type Decision = {
   reasons: string[]
   context: Record<string, unknown> | null
 }
-type DecisionsPayload = {
+export type DecisionsPayload = {
   summary: {
     total: number
     approved: number
@@ -25,9 +26,11 @@ type DecisionsPayload = {
 const POLL_MS = 15000
 const time = (value: string) => new Date(value).toLocaleTimeString()
 
-export default function EnginePanel() {
+export default function EnginePanel({ onLoad }: { onLoad?: (result: PanelLoad<DecisionsPayload>) => void } = {}) {
   const [payload, setPayload] = useState<DecisionsPayload | null>(null)
   const [error, setError] = useState('')
+  const onLoadRef = useRef(onLoad)
+  useEffect(() => { onLoadRef.current = onLoad })
 
   const refresh = useCallback(async () => {
     try {
@@ -36,8 +39,11 @@ export default function EnginePanel() {
       if (!response.ok) throw new Error(body.error || 'Decision records are unavailable')
       setPayload(body as DecisionsPayload)
       setError('')
+      onLoadRef.current?.({ data: body as DecisionsPayload, error: '' })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Decision records are unavailable')
+      const message = cause instanceof Error ? cause.message : 'Decision records are unavailable'
+      setError(message)
+      onLoadRef.current?.({ data: null, error: message })
     }
   }, [])
 

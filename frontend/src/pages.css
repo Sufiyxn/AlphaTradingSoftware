@@ -1,0 +1,43 @@
+/* Multi-page shell additions: active navigation state, async page states,
+   and the small layout helpers the nine pages use. Appended styles only —
+   the existing dark trading theme in dashboard.css / connections.css /
+   dashboard-overrides.css is unchanged. */
+
+/* --- navigation --------------------------------------------------------- */
+.main-nav a.active{color:#55d4a1;border-color:#2b5144;background:#111f1c}
+
+/* --- async states (loading / empty blocks) ------------------------------ */
+.async-state{display:flex;align-items:center;gap:10px;border:1px solid #202d3c;background:#101925;border-radius:7px;padding:17px 18px;margin:0 0 15px;color:#8492a4;font:10px 'DM Mono',monospace;letter-spacing:.06em}
+.spinner{width:11px;height:11px;flex:0 0 auto;border:2px solid #2a394b;border-top-color:#4bd6a3;border-radius:50%;animation:alpha-spin .8s linear infinite}
+@keyframes alpha-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.spinner{animation:none}}
+
+/* --- page layout helpers ------------------------------------------------ */
+.page-two-col{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(290px,1fr);gap:15px;margin-bottom:15px}
+.page-two-col .panel{align-self:start}
+@media(max-width:900px){.page-two-col{grid-template-columns:1fr}}
+
+/* --- session strip (markets) -------------------------------------------- */
+.session-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:0 22px}
+.session-strip .health-row{border-bottom:1px solid #202c3b}
+
+/* --- universe chips (watchlists) ---------------------------------------- */
+.universe-chips{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 12px}
+.universe-chip{border:1px solid #2b3a4d;background:#1a2736;color:#c5d0df;border-radius:4px;padding:6px 8px;font:9px 'DM Mono',monospace}
+
+/* --- recent activity digest (overview) ---------------------------------- */
+.activity-list{display:grid}
+.activity-row{display:flex;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid #202c3b;font:10px 'DM Mono',monospace;color:#aab6c6}
+.activity-row:last-child{border-bottom:0}
+.activity-row .activity-time{flex:0 0 auto;color:#68788c}
+.activity-row .event-message{max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* --- count strip (orders summary) --------------------------------------- */
+.count-strip{display:flex;flex-wrap:wrap;gap:16px;color:#8391a3;font:10px 'DM Mono',monospace;border-bottom:1px solid #202c3b;padding-bottom:11px;margin-bottom:11px}
+.count-strip b{color:#dce4ee;font-weight:400;margin-left:4px}
+
+/* --- rejection tally (scanner strategy context) ------------------------- */
+.reason-tally{display:grid;gap:7px;margin:10px 0 0}
+.reason-tally>div{display:flex;justify-content:space-between;align-items:baseline;gap:14px;border-bottom:1px solid #202c3b;padding-bottom:6px;color:#aab6c6;font-size:10px}
+.reason-tally>div:last-child{border-bottom:0}
+.reason-tally b{font:9px 'DM Mono',monospace;color:#e8edf5;font-weight:400;flex:0 0 auto}

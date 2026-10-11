@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { PanelLoad } from './types'
 
 type Opportunity = {
   symbol: string
@@ -11,8 +12,8 @@ type Opportunity = {
   reasons: string[]
   valid: boolean
 }
-type ScannerRow = { symbol: string; error: string | null; eligible: boolean; opportunity: Opportunity | null }
-type ScannerPayload = {
+export type ScannerRow = { symbol: string; error: string | null; eligible: boolean; opportunity: Opportunity | null }
+export type ScannerPayload = {
   provider: string | null
   provider_state: string | null
   market_session: string
@@ -25,9 +26,11 @@ const POLL_MS = 60000
 const usd = (value: number | null) =>
   value == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)
 
-export default function ScannerPanel({ onSelect }: { onSelect: (symbol: string) => void }) {
+export default function ScannerPanel({ onSelect, onLoad }: { onSelect: (symbol: string) => void; onLoad?: (result: PanelLoad<ScannerPayload>) => void }) {
   const [payload, setPayload] = useState<ScannerPayload | null>(null)
   const [error, setError] = useState('')
+  const onLoadRef = useRef(onLoad)
+  useEffect(() => { onLoadRef.current = onLoad })
 
   const refresh = useCallback(async () => {
     try {
@@ -36,8 +39,11 @@ export default function ScannerPanel({ onSelect }: { onSelect: (symbol: string) 
       if (!response.ok) throw new Error(body.error || 'Scanner results are unavailable')
       setPayload(body as ScannerPayload)
       setError('')
+      onLoadRef.current?.({ data: body as ScannerPayload, error: '' })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Scanner results are unavailable')
+      const message = cause instanceof Error ? cause.message : 'Scanner results are unavailable'
+      setError(message)
+      onLoadRef.current?.({ data: null, error: message })
     }
   }, [])
 
