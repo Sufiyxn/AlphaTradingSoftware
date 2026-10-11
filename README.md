@@ -69,14 +69,17 @@ The product ships with **no market data connected**. `GET /api/status` reports `
 
 Connect one of the documented providers in `.env` to supply prices (configuration, states, and error mapping are documented in `docs/MARKET_DATA.md`):
 
-- a configured market-data provider (Polygon, Alpha Vantage) for live and historical prices;
+- a configured market-data provider (Polygon, Alpha Vantage, Alpaca) for live and historical prices;
+- a live WebSocket stream from Polygon or Alpaca that pushes trades to the charts, watchlist, scanner, and valuation through the same quote service (see below);
 - TradingView alerts delivered to the webhook endpoint for signals.
 
-Each provider reads only its own key (`POLYGON_API_KEY`, `ALPHAVANTAGE_API_KEY`), and credentials alone never count as connectivity: the backend records real evidence per request - `UNAVAILABLE` until the first success, then `CONNECTED`, downgraded to `STALE` after the freshness window, `RATE_LIMITED` while throttled, or `ERROR` when credentials are rejected or a response breaks the documented schema. `GET /api/backtest` runs only on bars actually retrieved from the connected provider and answers `status: NO_DATA` when there are none, rather than claiming a result.
+Each provider reads only its own key (`POLYGON_API_KEY`, `ALPHAVANTAGE_API_KEY`, `ALPACA_API_KEY`/`ALPACA_API_SECRET`), and credentials alone never count as connectivity: the backend records real evidence per request - `UNAVAILABLE` until the first success, then `CONNECTED`, downgraded to `STALE` after the freshness window, `RATE_LIMITED` while throttled, or `ERROR` when credentials are rejected or a response breaks the documented schema. `GET /api/backtest` runs only on bars actually retrieved from the connected provider and answers `status: NO_DATA` when there are none, rather than claiming a result.
 
 Paper trading then simulates **execution and account only** - simulated cash (`PAPER_STARTING_CASH`), simulated fills, simulated positions, and simulated P&L computed from those real prices. A paper position opened with no continuous price source is marked `UNPRICED` and is never marked, stopped, or targeted from an invented price; stop-loss and take-profit act only once a real market-data provider is connected. Manual closure stays available, always requires an explicit real exit price, and can scale a position out in part instead of only closing it in full.
 
 A market-data bridge (`backend/market_data/bridge.py`) is the only path that moves a paper position's market price. It is provider-agnostic: it reads whatever `MarketDataProvider` is connected, ages each quote against `MARKET_DATA_STALE_AFTER_SECONDS` (default 300), and reports one of five availability states on `/api/status` and `/api/positions` - `CONNECTED`, `NOT_CONFIGURED`, `UNAVAILABLE`, `STALE`, or `ERROR`. A position is `FRESH` only when its mark came from a quote inside that window; `STALE` marks keep the real observed price and timestamp but pause automatic exits; `UNPRICED` marks report `current_price: null` and `unrealized_pnl: null` so no consumer can render a fabricated $0. `GET /api/positions` also reports `price_state`, `price_as_of`, `price_reason`, `auto_exit_enabled`, and `portfolio.valuation_status` (`COMPLETE` or `PARTIAL`).
+
+Live prices can also arrive as a **push stream** instead of a REST refresh: with `MARKET_DATA_STREAM=on` and a Polygon or Alpaca provider configured, the backend opens one WebSocket (a stdlib RFC 6455 client, `backend/market_data/ws.py`), authenticates, subscribes to the trade channel for the current universe, and normalizes every event with its provider timestamp into the same `MarketDataService` that feeds charts, the watchlist, the scanner, and valuation. `GET /api/status`, `GET /api/quotes`, and the Markets page report the socket's honest state (`READY`, `CONNECTING`, `CONNECTED`, `RECONNECTING`, `AUTH_FAILED`, `SUBSCRIPTION_FAILED`, `NOT_CONFIGURED`, `OFF`), the feed entitlement (for example Alpaca's free plan = real-time IEX), event counters, the last event time, and the reconnect count; `streaming: true` is only ever reported for a live socket. A dropped socket reconnects with capped exponential backoff, and a symbol the stream has not seen falls back to the REST provider or stays `UNPRICED`. No test can open a vendor socket: the stream is exercised against the loopback harness `backend/testing/ws_server.py` and `python scripts/stream_smoke.py` proves the whole path over a real socket without contacting any vendor.
 
 Because the portfolio is in-memory but every trade is journaled, `ApplicationRuntime` reconciles the two at startup (`backend/paper_trading/reconcile.py`): open positions, realized P&L, trade counts, and cash are rebuilt from SQLite, restored positions start `UNPRICED`, and a `JOURNAL_RECONCILED` event is written. A restart cannot silently diverge from the recorded trade book.
 
@@ -94,10 +97,14 @@ Execution is provider-agnostic (`docs/CONNECTIONS.md`). Every order - a TradingV
 
 ```powershell
 python -m pytest backend/tests -q
+python scripts/http_smoke.py         # 58 checks against a running backend
+python scripts/stream_smoke.py       # 13 checks, real socket, no vendor contact
+python scripts/e2e_smoke.py          # 46 browser checks (starts dev servers as needed)
 cd frontend
-npm run build
+npm run build                        # tsc --noEmit + vite build
+npm test                             # node --test
 ```
 
-Expected: `467 passed, 150 subtests` on the backend (including `backend/tests/test_risk_hardening.py` and `backend/tests/test_order_lifecycle.py`), and a successful frontend type-check/build with no changes required for Phase 9 (orders travel the existing API surface).
+Expected: `676 passed, 271 subtests` on the backend, `58/58`, `13/13`, `46/46` for the smoke scripts, and a clean frontend type-check/build. Frontend tests: `23 passed` when the optional live check is enabled (`$env:ALPHA_API_BASE='http://127.0.0.1:8000'; npm test` with a backend running), otherwise `22 passed, 1 skipped`. The browser smoke needs Playwright's Chromium once (`python -m playwright install chromium`).
 
 SQLite journal data is stored under `data/alpha_trading.sqlite3` by default and is ignored by Git. Override `DATABASE_PATH` to use a different local file. Secrets belong only in `.env`; `.env` is ignored and `.env.example` contains no credentials.
