@@ -34,6 +34,32 @@ TRADINGVIEW_MAX_BODY_BYTES=8192
 Restart the backend after changing `.env`. With the endpoint disabled or the secret unset, the
 route answers `503 NOT_CONFIGURED` and `/api/connections` reports `NOT_CONFIGURED`.
 
+## Reaching it from TradingView (external delivery)
+
+A TradingView alert is an **outbound HTTP POST from TradingView's own servers** to the webhook
+URL you type into the alert. That means:
+
+- The URL must be **publicly reachable from the internet**. The backend binds to `127.0.0.1`
+  by default, so `http://127.0.0.1:8000/...` (and anything on `localhost`) can only ever be
+  called from this machine — TradingView cannot reach it.
+- The usual setup is a **secure tunnel**: start one (for example `ngrok http 8000` or
+  `cloudflared tunnel --url http://127.0.0.1:8000`), take the public `https://` URL it prints,
+  and use `<tunnel-url>/api/webhooks/tradingview` as the alert's webhook URL. The public leg is
+  HTTPS; the tunnel forwards to the platform's loopback HTTP listener, which stays
+  unexposed.
+- Keep the backend bound to `127.0.0.1`, keep owner controls on the loopback interface, and
+  expose nothing except the webhook path. The webhook authenticates with
+  `TRADINGVIEW_WEBHOOK_SECRET` alone — never the owner token — so a public URL is safe to
+  expose only while the secret is set and the endpoint is enabled.
+
+**Local tests vs. genuine delivery.** Posting to `http://127.0.0.1:8000/api/webhooks/tradingview`
+from this machine, and the automated suite (`backend/tests/test_tradingview_webhook.py`), prove
+authentication, validation, freshness, duplicate/replay protection, audit journaling, and the
+risk → paper-execution pipeline. They do **not** prove external delivery. External delivery is
+only verified when a real alert sent from TradingView's infrastructure is accepted: the response
+is `202 ACCEPTED`, the execution appears in `/api/activity`, and `/api/connections` moves the
+TradingView state to `CONNECTED` with its traffic counter increasing.
+
 ## Authentication
 
 The endpoint authenticates with `TRADINGVIEW_WEBHOOK_SECRET` alone and never requires
