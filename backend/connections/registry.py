@@ -2,7 +2,7 @@
 
 Adding a provider means registering a descriptor with an adapter factory that
 implements ``TradingPlatformAdapter``. Nothing else changes: strategy code,
-the risk engine, the decision engine, TradingView, and the market-data
+the risk engine, the decision engine, the signal paths, and the market-data
 providers never learn a provider's name.
 
 ``implemented=False`` descriptors are advertised honestly - they have no

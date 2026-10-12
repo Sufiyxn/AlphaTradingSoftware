@@ -37,7 +37,6 @@ from backend.risk import RiskEngine
 from backend.scanner import MarketScannerService, StrategyAnalyzer, SymbolUniverse
 from backend.scanner.watchlist import WatchlistService
 from backend.strategies import StrategyEngine
-from backend.tradingview import TradingViewWebhookService
 
 from .connections import ConnectionCenter
 
@@ -150,6 +149,13 @@ class ApplicationRuntime:
             lookback=timedelta(days=trading.history_lookback_days),
             minimum_reward_risk=self.config.strategy.min_reward_risk,
             clock=self.clock,
+            # Timeframe-aware loading with the intraday-to-daily fallback: the
+            # same validated series service the charts and watchlist read, so
+            # weekend scans work on completed daily bars instead of an empty
+            # intraday window.
+            series=self.market_series,
+            timeframe=self.config.market_data.timeframe,
+            daily_lookback_days=float(trading.history_lookback_days),
         )
         self.orchestrator = TradingOrchestrator(
             market_data=self.market_data, scanner=self.scanner, strategy=self.strategy,
@@ -172,6 +178,10 @@ class ApplicationRuntime:
             journal=self.repository,
             session_submission=trading.session_submission,
             provider_extended_hours=self._provider_extended_hours,
+            # The strategy re-loads bars on the candidate's own frame
+            # (daily when the intraday window is empty), through the same
+            # validated series service everything else reads.
+            series=self.market_series,
         )
         self.watchlist = WatchlistService(
             self.market_series, self.orchestrator.config.universe.symbols)
@@ -179,15 +189,6 @@ class ApplicationRuntime:
         self.notifier = LocalMockNotifier()
         self.daily_reports = DailyReportingService(self.repository, self.performance, self.notifier)
         self.exports = LogExportService(self.repository)
-        # TradingView is a signal source only: it authenticates with its own
-        # secret, normalizes at the boundary, and enters the same risk and
-        # paper workflow as every other signal path.
-        self.tradingview = TradingViewWebhookService(
-            settings=self.config.tradingview, paper=self.paper, risk=self.risk,
-            portfolio=self.portfolio, journal=self.repository, clock=self.clock,
-            allowed_symbols=self.orchestrator.config.universe.symbols,
-            max_candidate_price=trading.max_candidate_price,
-        )
         self.owner_controls = None
         if owner_token:
             self.owner_controls = OwnerControlPlane(
@@ -200,10 +201,10 @@ class ApplicationRuntime:
             risk=self.risk, notifier=self.notifier,
             owner_controls_enabled=self.owner_controls is not None, clock=self.clock,
             repository=self.repository, market_data_availability=self.valuation.availability,
-            tradingview_status=self.tradingview.connection_state,
-            tradingview_check=self.tradingview.self_check,
             execution_connections=self.connection_manager,
         )
+        self._engine_lock = threading.Lock()
+        self._engine_thread: threading.Thread | None = None
         self._report_stop = threading.Event()
         self._report_thread = threading.Thread(target=self._schedule_reports, name="alpha-daily-report", daemon=True)
         self._report_thread.start()
@@ -231,6 +232,25 @@ class ApplicationRuntime:
         if getattr(self, "market_stream", None) is None:
             return False
         self.market_stream.start()
+        return True
+
+    def start_trading_engine(self) -> bool:
+        """Start the local signal generator's loop in its own worker thread.
+
+        Mirrors the market stream: the application entry point calls this so
+        a restart resumes scanning on its own, while construction never
+        starts a worker - a test runtime keeps full control of every cycle.
+        An engine stopped by an emergency stop or termination stays stopped
+        until the owner explicitly resets it. Returns True when a worker was
+        launched.
+        """
+        with self._engine_lock:
+            if self._engine_thread is not None and self._engine_thread.is_alive():
+                return False
+            self._engine_thread = threading.Thread(
+                target=self.orchestrator.start,
+                name="alpha-trading-engine", daemon=True)
+            self._engine_thread.start()
         return True
 
     def market_stream_status(self) -> dict:

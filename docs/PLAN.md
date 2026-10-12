@@ -89,6 +89,17 @@
 > across a closed session is proven by test: a position marked FRESH before the close ages to
 > STALE with its last *real* price and timestamp once no new quote arrives - never FRESH, never
 > an invented value, and never an automatic exit. Detail: `docs/PIPELINE.md`.**
+> **TradingView integration (Phase 4) was retired on 2026-10-12 by explicit owner instruction,
+> ahead of the pending phases. The webhook route, HMAC authenticator, signal payload/validation
+> layer, idempotency store, `TradingViewSettings`, the Connections card and `docs/TRADINGVIEW.md`
+> are gone; `POST /api/webhooks/tradingview` now answers 404. Everything Phase 4 protected is
+> untouched, because none of it lived in the webhook: signal submissions enter the same
+> `TradingPipeline` (validation → freshness → connection verification → `RiskEngine` → safety
+> gate → verified adapter), every decision is journaled with its outcome code, replay of an
+> idempotency key is refused (`DUPLICATE_INTENT`), unsafe setups are refused (`RISK_REJECTED`),
+> and there is still no direct anything → broker path. The final workflow needs no TradingView
+> subscription, alert, webhook, tunnel or secret. Historical Phase 4 notes below are kept as the
+> record of what was built and then removed; constraint 12 is superseded by this retirement.**
 
 ---
 
@@ -107,7 +118,7 @@
    canonical flow:
 
    ```
-   Signal Source (TradingView alert | internal strategy | AI advisory | future sources)
+   Signal Source (internal strategy | AI advisory | future sources)
        -> Signal Normalizer / Validator
         -> TradingPipeline
              -> Strategy
@@ -118,9 +129,10 @@
         -> Mode-specific execution (paper | live via a verified execution provider)
    ```
 
-   The frontend, TradingView, AI, and individual providers must never bypass this architecture.
+   The frontend, signal sources, AI, and individual providers must never bypass this architecture.
    Phase 7 delivered this as `backend/pipeline/` (`TradingPipeline`): every signal path —
-   TradingView, the orchestrator, and the paper engine — enters through
+   the scanner/orchestrator, the paper engine, and any caller holding an
+   `ExecutionIntent` — enters through
    `PaperTradingEngine.submit_decision` with an `ExecutionIntent` (or a pre-approved
    `RiskDecision`), and no production file outside `backend/execution/` and `backend/pipeline/`
    may call `place_order` — enforced by `backend/tests/test_pipeline.py`. Every signal path must
@@ -137,9 +149,9 @@
 6. **Secrets never leave the process.** No API key, token, or webhook secret in logs, API payloads,
    journal rows, exports, screenshots, or the frontend bundle. Status endpoints expose presence and
    state only. Secrets are never exposed, logged, or committed.
-7. **HTTP auth split.** `POST /api/webhooks/tradingview` uses its dedicated webhook-secret/HMAC
-   authentication and **must not** require the owner token. Every other state-changing `POST`
-   requires `X-Owner-Token` with owner controls enabled.
+7. **HTTP auth split.** Every state-changing `POST` requires `X-Owner-Token` with owner controls
+   enabled. (The Phase 4 webhook's dedicated HMAC authentication was removed with the TradingView
+   integration on 2026-10-12; no unauthenticated state-changing route remains.)
 8. **Data-dependent features degrade honestly.** Structured `NOT_CONFIGURED` / `UNAVAILABLE` with a
    reason — never a fabricated value, never a global error banner. Credential presence is not
    connectivity; provider health must be checked before anything is treated as usable.
@@ -152,13 +164,15 @@
     library). Frontend tests = `vitest` + `jsdom` + `@testing-library/react`.
 11. **The three systems stay independent.** Market-data providers, signal/analysis sources, and
     execution providers are separate architectural concepts and must never be coupled
-    (TradingView → broker, AI → broker, strategy → broker, market-data provider → broker).
+    (signal source → broker, AI → broker, strategy → broker, market-data provider → broker).
     `RiskEngine` always sits between decision generation and execution.
-12. **TradingView is required for the initial testing/demo and remains first-class.** It is a
-    signal/alert source only — never a broker, never the execution engine, never the continuous
-    market-data provider. The Phase 4 implementation (HMAC auth, replay protection, signal
-    validation, stale-signal handling, RiskEngine path, no direct TradingView → broker execution)
-    must not be removed, weakened, bypassed, or redesigned, including after live execution lands.
+12. **~~TradingView is required for the initial testing/demo and remains first-class.~~
+    Superseded 2026-10-12:** the owner instructed the removal of the TradingView integration, and
+    it was removed in full (route, auth, signal layer, config, UI, docs). What the constraint
+    protected still holds for every remaining signal path: a signal source is only ever a signal
+    source — never a broker, never the execution engine, never the continuous market-data
+    provider; it is validated, freshness-checked, risk-evaluated, and journaled before execution;
+    and no direct signal → broker execution exists.
 13. **No automatic SL/TP on stale or fabricated prices.** Automatic exits require a `FRESH` real
     mark with `price_as_of` set (Phase 3 contract). Manual close never invents a price.
 14. **Live execution is gated.** Live execution requires verified credentials/configuration, an
@@ -168,7 +182,7 @@
     infrastructure (`backend/testing/`, `backend/tests/`) — never reachable from
     `ApplicationRuntime`.
 16. **The end goal is an autonomous trading automation platform.** A dashboard, a backtester, a
-    TradingView webhook receiver, and a paper-trading simulator are components/stages of that
+    A signal receiver, and a paper-trading simulator are components/stages of that
     larger system — they are not the product.
 
 ### Per-phase verification protocol
@@ -180,8 +194,9 @@
 - HTTP smoke against a running instance: `/api/status`, `/api/positions`, `/api/readiness`,
   `/api/connections` parsed as JSON — committed as `scripts/http_smoke.py`, which boots the app
   in-process on a temporary database with no market-data provider attached (so it can never
-  reach a vendor API) and checks the whole documented HTTP surface, including a signed webhook
-  trade, the owner-token guards, and a scan of every response for the credentials that run
+  reach a vendor API) and checks the whole documented HTTP surface, including a paper trade
+  submitted through the canonical pipeline, the owner-token guards, the 404 answer of the retired
+  TradingView route, and a scan of every response for the credentials that run
   configured.
 - `git diff` reviewed for accidental regressions.
 - Explicit confirmation: no synthetic/demo data introduced, no `MOCK` reachable from the
@@ -200,12 +215,12 @@ another, and no decision or execution shortcut may join them directly.
 | System | Members today | Role |
 |---|---|---|
 | **Market data providers** | Polygon, Alpha Vantage, future providers | Continuous, real pricing/history for scanning, valuation, marking, backtesting. Phases 3–5. |
-| **Signal / analysis sources** | TradingView, internal strategies, future signal sources, AI advisory | Produce signals, setups, and advisory input. Nothing in this row executes an order. |
+| **Signal / analysis sources** | internal strategies (the scanner), future signal sources, AI advisory | Produce signals, setups, and advisory input. Nothing in this row executes an order. (TradingView was retired from this row on 2026-10-12.) |
 | **Execution providers** | Robinhood, Alpaca, future brokers/trading platforms | Submit/cancel/modify orders and report fills **through a standardized internal execution interface**, only after `RiskEngine`. Framework in place (Phase 6); no external provider adapter is installed yet. |
 
 Forbidden couplings — architectural, permanent:
 
-- TradingView → broker
+- Signal source → broker
 - AI → broker
 - Strategy → broker
 - Market data provider → broker
@@ -243,13 +258,15 @@ Rules:
 - Neither Robinhood nor Alpaca is mandatory. New providers must be addable **without modifying**
   the core trading strategy/decision engine.
 
-### TradingView's role in the initial demonstration
+### ~~TradingView's role in the initial demonstration~~ — retired 2026-10-12
 
-TradingView **is required** for the initial testing and client-demonstration workflow, and must
-remain supported after live execution is introduced. It is a signal/alert source — not a broker,
-not the execution engine, not the continuous market-data provider.
+TradingView **was** required for the initial testing and client-demonstration workflow. That
+integration was removed in full by explicit owner instruction (see the retirement note at the top
+of this document). The demonstration workflow is now the canonical pipeline itself: a trade
+setup submitted to `PaperTradingEngine`/`TradingPipeline`, proven by `scripts/http_smoke.py` on a
+temporary database with no vendor anywhere in the loop.
 
-Intended initial demonstration flow:
+Historical (as originally specified):
 
 ```
 TradingView alert
@@ -263,8 +280,9 @@ TradingView alert
   -> reporting / journal
 ```
 
-Preserve from Phase 4: HMAC authentication, replay protection, signal validation, stale-signal
-handling, the `RiskEngine` path, and the absence of any direct TradingView → broker execution.
+Preserved from Phase 4, now carried by the pipeline itself rather than by a webhook: input
+validation, replay/duplicate protection, stale-signal handling, the `RiskEngine` path, and the
+absence of any direct signal source → broker execution.
 
 ### End goal
 
@@ -289,7 +307,7 @@ real market data
   -> performance / reporting
 ```
 
-The platform is **not** merely a dashboard, a backtester, a TradingView webhook receiver, or a
+The platform is **not** merely a dashboard, a backtester, a signal webhook receiver, or a
 paper-trading simulator. Those are components/stages of the larger system.
 
 ---
@@ -301,7 +319,7 @@ paper-trading simulator. Those are components/stages of the larger system.
 | 1 | Configuration / Mode Foundation | **DONE** |
 | 2 | Remove Synthetic/Demo Production Runtime | **DONE** |
 | 3 | Real Market-Data Bridge + Paper Position Lifecycle | **DONE** |
-| 4 | TradingView Integration | **DONE** |
+| 4 | TradingView Integration | **DONE** → **retired 2026-10-12** (removed in full by owner instruction; the canonical pipeline remains the only execution path) |
 | 5 | Real Market-Data Providers | **DONE** |
 | 6 | Connection & Execution Provider Framework | **DONE** |
 | 7 | Canonical Trading Pipeline | **DONE** (committed: `2f1eee5`) |
@@ -384,7 +402,15 @@ paper-trading simulator. Those are components/stages of the larger system.
 - Tests: `test_market_data_bridge.py` (10), `test_position_valuation.py` (17), 3 existing tests
   adapted to the stricter FRESH-mark contract.
 
-### PHASE 4 — TradingView Integration · DONE (203 passed, 30 subtests)
+### PHASE 4 — TradingView Integration · DONE (203 passed, 30 subtests) — **RETIRED 2026-10-12**
+
+> This phase is historical. Every component listed below was deleted on 2026-10-12 by explicit
+> owner instruction: `backend/tradingview/`, `backend/signals/`, the webhook route,
+> `TradingViewSettings`, the Connections card, the frontend fixtures and `docs/TRADINGVIEW.md`.
+> The record is kept because the invariants it proved (validation, replay protection, risk before
+> execution, no direct vendor → broker path) still hold — they now live in `backend/pipeline/`
+> and are covered by `backend/tests/test_pipeline.py`, `backend/tests/test_market_sessions.py`
+> and `scripts/http_smoke.py`.
 
 - **Endpoint:** `POST /api/webhooks/tradingview` (`backend/core/server.py`) — route-first, never
   requires `X-Owner-Token`, hard body limit (413), 500 with a machine-readable body on failure.
@@ -509,9 +535,10 @@ Delivered scope (was the future-phase scope below):
   `PROVIDER_EXECUTION_REJECTION`
 - idempotency: at most one order per key in a bounded window; a duplicate never submits and
   never books twice
-- all three signal paths enter through `PaperTradingEngine.submit_decision` with an
-  `ExecutionIntent` (TradingView with freshness + quantity cap + `signal_id`, the orchestrator
-  with scanner setups, paper tests with pre-approved `RiskDecision`s) — risk is evaluated exactly
+- all remaining signal paths enter through `PaperTradingEngine.submit_decision` with an
+  `ExecutionIntent` (the orchestrator with scanner setups, paper tests with pre-approved
+  `RiskDecision`s; the TradingView path that also used this entry was retired on 2026-10-12) —
+  risk is evaluated exactly
   once, inside the pipeline, and journaled exactly once
 - the runtime shares one `ConnectionManager` between the Connection Center and order routing;
   swapping a connection's adapter invalidates its verification evidence and the pipeline
@@ -766,7 +793,7 @@ as done when its acceptance criteria and regression tests pass.
   incomplete/insufficient-data states.
 
 ### PHASE 15 — Connection Center
-- Market-data connections, execution-provider connections, TradingView, notification integrations;
+- Market-data connections, execution-provider connections, notification integrations;
   honest `NOT_CONFIGURED` / `CONNECTED` / `ERROR` / `UNAVAILABLE` states; credential presence must
   not equal successful connectivity.
 
@@ -790,8 +817,7 @@ as done when its acceptance criteria and regression tests pass.
   dates.
 
 ### PHASE 20 — Security / API Hardening
-- Owner authentication for state-changing APIs; TradingView webhook uses its dedicated webhook
-  authentication (not owner auth); input validation; secret redaction; safe error responses;
+- Owner authentication for state-changing APIs; input validation; secret redaction; safe error responses;
   appropriate access control; rate limiting/replay protection where applicable; credential
   storage hardening.
 
@@ -801,17 +827,17 @@ as done when its acceptance criteria and regression tests pass.
 
 ### PHASE 22 — Dashboard / Frontend
 - Professional trading dashboard; real market state, positions, P&L, risk, connections,
-  TradingView, charts, backtesting, system health; clear empty/unconfigured/unpriced states;
+  charts, backtesting, system health; clear empty/unconfigured/unpriced states;
   hand-built SVG charts where appropriate; no fake/demo numbers.
 
 ### PHASE 23 — Testing / Dependencies / CI
 - Comprehensive backend tests; frontend Vitest tests; HTTP/API tests; integration tests; provider
-  contract tests; execution-provider contract tests; TradingView webhook tests; dependency
+  contract tests; execution-provider contract tests; dependency
   manifest; CI; frontend/backend verification; regression coverage.
 
 ### PHASE 24 — Final Integration / Production Readiness
 - Complete end-to-end verification; BACKTEST/PAPER/LIVE mode validation; real-data flow validation;
-  TradingView → signal → pipeline → paper execution; real market data → position marking → P&L;
+  signal → pipeline → paper execution; real market data → position marking → P&L;
   execution provider → order/fill → reconciliation; risk enforcement; security verification;
   frontend/backend integration; remove dead/demo paths; final documentation; final test/build/HTTP
   verification; production-readiness assessment toward the autonomous trading goal.

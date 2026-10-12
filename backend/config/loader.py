@@ -25,7 +25,6 @@ from .providers import (
     MarketDataSettings,
     NotificationChannelSettings,
     NotificationSettings,
-    TradingViewSettings,
 )
 from .settings import Settings, TradingSettings, parse_bool, parse_number, parse_universe
 
@@ -43,7 +42,6 @@ class Config:
     risk: RiskConfig
     market_data: MarketDataSettings
     broker: BrokerSettings
-    tradingview: TradingViewSettings
     ai: AISettings
     notifications: NotificationSettings
 
@@ -59,7 +57,6 @@ class Config:
             "mode": self.mode_selection.effective.value,
             "market_data": self.market_data.describe(),
             "broker": self.broker.describe(),
-            "tradingview": self.tradingview.describe(),
             "ai": self.ai.describe(),
             "notifications": self.notifications.describe(),
             "risk": {
@@ -106,7 +103,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         risk=_risk_config(env, max_candidate_price=trading.max_candidate_price),
         market_data=_market_data_settings(env),
         broker=_broker_settings(env),
-        tradingview=_tradingview_settings(env),
         ai=_ai_settings(env),
         notifications=_notification_settings(env),
     )
@@ -314,26 +310,6 @@ def _broker_settings(env: Mapping[str, str]) -> BrokerSettings:
         api_key=_get(env, "ALPACA_API_KEY") or _get(env, "TRADING_PLATFORM_API_KEY"),
         api_secret=_get(env, "ALPACA_API_SECRET") or _get(env, "TRADING_PLATFORM_API_SECRET"),
         account_id=_get(env, "ALPACA_ACCOUNT_ID") or _get(env, "TRADING_PLATFORM_ACCOUNT_ID"),
-    )
-
-
-def _tradingview_settings(env: Mapping[str, str]) -> TradingViewSettings:
-    strategies = _get(env, "TRADINGVIEW_ALLOWED_STRATEGIES") or ""
-    allowed = tuple(item.strip() for item in strategies.split(",") if item.strip())
-    defaults = TradingViewSettings()
-    return TradingViewSettings(
-        enabled=parse_bool(_get(env, "TRADINGVIEW_ENABLED"), default=False),
-        webhook_secret=_get(env, "TRADINGVIEW_WEBHOOK_SECRET"),
-        allowed_strategies=allowed,
-        max_body_bytes=_int(env, "TRADINGVIEW_MAX_BODY_BYTES", defaults.max_body_bytes),
-        max_signal_age_seconds=parse_number(
-            _get(env, "TRADINGVIEW_MAX_SIGNAL_AGE_SECONDS"),
-            default=defaults.max_signal_age_seconds,
-            name="TRADINGVIEW_MAX_SIGNAL_AGE_SECONDS"),
-        stale_after_seconds=parse_number(
-            _get(env, "TRADINGVIEW_STALE_AFTER_SECONDS"),
-            default=defaults.stale_after_seconds,
-            name="TRADINGVIEW_STALE_AFTER_SECONDS"),
     )
 
 

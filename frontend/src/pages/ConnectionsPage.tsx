@@ -33,16 +33,23 @@ export default function ConnectionsPage({ status, statusPhase, token, onTokenCha
     }
   }
 
+  // The panel owns the fetch that reports back through `onLoad`, so it has to
+  // be mounted while the page is still `loading` - gating it on `ready` waits
+  // for data only that panel can request. It stays hidden (same pattern as
+  // Watchlists) until its first payload arrives, so an empty card is never
+  // shown as if it were the answer.
   return <>
     {phase === 'loading' && <LoadingState label="Loading connection records…" />}
     {phase === 'error' && <ErrorState what="Connections" message={panel.error} />}
-    {phase === 'ready' && <section className="panel extra-section">
-      <ConnectionsPanel
-        key={refresh}
-        token={token}
-        onLoad={(result) => setPanel((previous) => ({ data: result.data ?? previous.data, error: result.error }))}
-      />
-    </section>}
+    <div hidden={phase !== 'ready'}>
+      <section className="panel extra-section">
+        <ConnectionsPanel
+          key={refresh}
+          token={token}
+          onLoad={(result) => setPanel((previous) => ({ data: result.data ?? previous.data, error: result.error }))}
+        />
+      </section>
+    </div>
 
     <section className="panel extra-section">
       <div className="panel-head">

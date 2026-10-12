@@ -147,7 +147,7 @@ class ScriptedAdapter(ProviderInstanceMixin):
     def get_quote(self, symbol: str):
         raise NotImplementedError(
             "execution providers are not a market-data source; "
-            "connect a market-data provider or TradingView signal source")
+            "connect a market-data provider or a signal path that supplies prices")
 
 
 def auth_failure(message: str = "the provider rejected the credentials") -> Exception:

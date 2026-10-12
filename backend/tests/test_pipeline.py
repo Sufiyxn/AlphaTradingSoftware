@@ -473,7 +473,7 @@ class NoAlternatePathTests(unittest.TestCase):
                          "only the execution stack and the pipeline may call place_order")
 
     def test_signal_paths_enter_through_the_pipeline(self):
-        for relative in ("tradingview/service.py", "orchestrator/service.py"):
+        for relative in ("orchestrator/service.py",):
             with self.subTest(path=relative):
                 text = (self.backend / relative).read_text(encoding="utf-8")
                 self.assertIn("submit_decision(", text)

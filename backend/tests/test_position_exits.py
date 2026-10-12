@@ -1,10 +1,11 @@
 """Phase 10 checkpoints 4 and 5: owner exits, including a partial close.
 
-CP4 exists because the only close paths were a TradingView ``EXIT`` alert and
-an automatic stop/target exit - and with no market-data provider attached
-(the configuration the committed smoke runs in) neither can fire. CP5 adds the
-scaling half: the same endpoint can reduce an open position instead of only
-ending it. These tests hold the guarantees the checkpoints promise:
+CP4 exists because the only close paths were an automatic stop/target exit
+and the owner close endpoint - and with no market-data provider attached
+(the configuration the committed smoke runs in) an automatic exit cannot fire.
+CP5 adds the scaling half: the same endpoint can reduce an open position
+instead of only ending it. These tests hold the guarantees the checkpoints
+promise:
 
 - the exit price is always supplied by the caller; it is never defaulted,
   marked or derived from the entry, because a fabricated exit price would be
@@ -34,52 +35,19 @@ from urllib.error import HTTPError
 from backend.config import load_config
 from backend.core.runtime import ApplicationRuntime
 from backend.core.server import create_server
-from backend.tradingview.auth import TradingViewAuthenticator
+from backend.tests.pipeline_fixture import open_position
 
 CLOCK = datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc)
-SECRET = "cp4-webhook-secret-never-echo-this"
 OWNER_TOKEN = "cp4-owner-token"
 
 
 def build_runtime(*, owner_token=OWNER_TOKEN, database_path=":memory:"):
     config = load_config(env={
-        "TRADINGVIEW_ENABLED": "true",
-        "TRADINGVIEW_WEBHOOK_SECRET": SECRET,
         **({"OWNER_CONTROL_TOKEN": owner_token} if owner_token else {}),
     })
     return ApplicationRuntime(database_path=database_path,
                               owner_token=owner_token,
                               clock=lambda: CLOCK, config=config)
-
-
-def alert(**overrides) -> dict:
-    body = {
-        "action": "buy",
-        "symbol": "AAPL",
-        "quantity": 5,
-        "price": 50.0,
-        "stop_loss": 48.0,
-        "take_profit": 54.0,
-        "timestamp": "2024-01-02T15:29:00Z",
-        "strategy": "tv_ema_cross",
-        "alert_id": "cp4-alert-1",
-    }
-    body.update(overrides)
-    return {key: value for key, value in body.items() if value is not None}
-
-
-def open_position(runtime, **overrides) -> dict:
-    """Open one paper position through the real signed webhook path."""
-    raw = json.dumps(alert(**overrides)).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "X-Webhook-Signature": "sha256="
-        + TradingViewAuthenticator(SECRET).signature(raw),
-    }
-    response = runtime.tradingview.handle(raw, headers)
-    if response.status != 202:
-        raise AssertionError(f"setup failed: {response.status} {response.body}")
-    return response.body
 
 
 class OwnerCloseTests(unittest.TestCase):
@@ -158,7 +126,6 @@ class OwnerCloseTests(unittest.TestCase):
     def test_the_close_response_carries_no_credential(self):
         outcome = self.runtime.close_position("AAPL", 51.0)
         serialized = json.dumps(outcome)
-        self.assertNotIn(SECRET, serialized)
         self.assertNotIn(OWNER_TOKEN, serialized)
 
 
@@ -231,7 +198,6 @@ class HttpPositionCloseTests(unittest.TestCase):
         self.assertEqual(second[0], 404)
         self.assertFalse(second[1]["closed"])
         serialized = json.dumps(outcome)
-        self.assertNotIn(SECRET, serialized)
         self.assertNotIn(OWNER_TOKEN, serialized)
 
 

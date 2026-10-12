@@ -194,12 +194,20 @@ def run_checks(page, checks: Checks, token: str, console_errors: list[str],
                                    "RECONNECTING", "AUTH_FAILED", "ERROR")),
                  stream_panel.splitlines()[0] if stream_panel else "empty")
     # The UI must show the backend's own explanation verbatim - no invented
-    # comfort text and no upgraded claim when the socket is not connected.
+    # comfort text and no upgraded claim when the socket is not connected. A
+    # healthy feed honestly reports no reason at all, and then the page must
+    # invent no explanation either.
     backend_stream = page.evaluate(
         "async () => (await fetch('/api/status')).json()").get("market_data_stream") or {}
     reason = backend_stream.get("reason") or ""
-    checks.check("the Markets page explains the feed state with the backend's own reason",
-                 bool(reason) and reason in stream_panel, reason[:70])
+    invented_reason = page.locator(
+        "section:has-text('Streaming connection') .empty-state").count() > 0
+    if reason:
+        checks.check("the Markets page explains the feed state with the backend's own reason",
+                     reason in stream_panel, reason[:70])
+    else:
+        checks.check("a feed reporting no reason shows no invented explanation",
+                     not invented_reason, "no reason rendered")
     state = backend_stream.get("state")
     checks.check("the displayed state token matches the backend's state",
                  bool(state) and state in stream_panel, state)
@@ -237,34 +245,47 @@ def run_checks(page, checks: Checks, token: str, console_errors: list[str],
     checks.check("the control page states that live trading is unavailable",
                  "Live trading is unavailable" in panel)
 
-    page.click("button:has-text('Start')")
+    # The buttons follow the real orchestrator state: Start is disabled while
+    # the engine runs, so the smoke drives it to a known state instead of
+    # assuming one. Stop is the one control that stays enabled either way, and
+    # without a token it must refuse before anything moves.
+    orchestrator_state = str(page.evaluate(
+        "async () => (await fetch('/api/status')).json().orchestrator?.status ?? ''"))
+    page.click("button:text-is('Stop')")
     page.wait_for_selector("text=Enter the owner control token", timeout=10000)
     checks.check("an action without a token is refused with an explanation", True)
 
     if token:
         page.fill("#owner-token", token)
-        page.click("button:has-text('Start')")
+        if orchestrator_state != "STOPPED":
+            page.click("button:text-is('Stop')")
+            page.wait_for_selector(".controls-panel .status-tag:has-text('STOPPED')",
+                                   timeout=15000)
+            checks.check("the orchestrator reaches STOPPED from its starting state",
+                         "STOPPED" in page.inner_text(".controls-panel"),
+                         orchestrator_state)
+        page.click("button:text-is('Start')")
         page.wait_for_selector(".controls-panel .status-tag:has-text('RUNNING')",
                                timeout=15000)
         checks.check("the owner token really starts the orchestrator",
                      "RUNNING" in page.inner_text(".controls-panel"))
-        page.click("button:has-text('Pause')")
+        page.click("button:text-is('Pause')")
         page.wait_for_selector(".controls-panel .status-tag:has-text('PAUSED')",
                                timeout=15000)
         checks.check("the owner token really pauses the orchestrator",
                      "PAUSED" in page.inner_text(".controls-panel"))
-        page.click("button:has-text('Resume')")
+        page.click("button:text-is('Resume')")
         page.wait_for_selector(".controls-panel .status-tag:has-text('RUNNING')",
                                timeout=15000)
         checks.check("the owner token really resumes the orchestrator",
                      "RUNNING" in page.inner_text(".controls-panel"))
-        page.click("button:has-text('Stop')")
+        page.click("button:text-is('Stop')")
         page.wait_for_selector(".controls-panel .status-tag:has-text('STOPPED')",
                                timeout=15000)
         checks.check("the owner token really stops the orchestrator",
                      "STOPPED" in page.inner_text(".controls-panel"))
         page.fill("#owner-token", "definitely-the-wrong-token")
-        page.click("button:has-text('Start')")
+        page.click("button:text-is('Start')")
         page.wait_for_selector("text=owner authentication failed", timeout=15000)
         checks.check("a wrong token is refused by the backend", True)
         page.fill("#owner-token", "")

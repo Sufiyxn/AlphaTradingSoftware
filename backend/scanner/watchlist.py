@@ -8,6 +8,7 @@ row with an honest reason, never a missing row and never an invented price.
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -19,12 +20,20 @@ from backend.market_data.series import (
 )
 from backend.strategies.indicators import atr, ema, rsi
 
+from .service import INTRADAY_FRAMES, daily_frame_for
+
 PRICED = "PRICED"
 UNPRICED = "UNPRICED"
 
 INDICATORS_OK = "OK"
 INDICATORS_INSUFFICIENT = "INSUFFICIENT_DATA"
 INDICATORS_UNAVAILABLE = "UNAVAILABLE"
+
+#: Row building is network-bound (a bar window per frame, plus a daily
+#: fallback when the intraday window is empty). Rows are built concurrently,
+#: but with a bounded pool so one large universe cannot stampede the
+#: provider's rate limit: at most this many symbols are in flight at once.
+_MAX_ROW_WORKERS = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +54,10 @@ class WatchlistRow:
     bar_count: int
     freshness: str | None
     age_seconds: float | None
+    #: Bar frame these numbers came from (``1min`` while the session trades,
+    #: the completed ``1day`` bars when the intraday window is empty). The UI
+    #: must show it, so a weekend row is never mistaken for a live intraday one.
+    timeframe: str | None = None
 
     def payload(self) -> dict:
         return {
@@ -64,6 +77,7 @@ class WatchlistRow:
             "bar_count": self.bar_count,
             "freshness": self.freshness,
             "age_seconds": self.age_seconds,
+            "timeframe": self.timeframe,
         }
 
 
@@ -100,15 +114,18 @@ class WatchlistService:
     def __init__(self, series: CandleSeriesService, symbols, *,
                  timeframe: str | None = None,
                  ema_period: int = 20, rsi_period: int = 14,
-                 atr_period: int = 14):
+                 atr_period: int = 14, daily_lookback_days: float = 90.0):
         if ema_period < 1 or rsi_period < 1 or atr_period < 1:
             raise ValueError("indicator periods must be positive")
+        if daily_lookback_days <= 0:
+            raise ValueError("daily_lookback_days must be positive")
         self._series = series
         self._symbols = tuple(symbols)
         self._timeframe = timeframe
         self._ema_period = ema_period
         self._rsi_period = rsi_period
         self._atr_period = atr_period
+        self._daily_lookback_days = daily_lookback_days
         self._lock = threading.RLock()
 
     def snapshot(self) -> WatchlistSnapshot:
@@ -125,11 +142,24 @@ class WatchlistService:
                 rows=tuple(self._unavailable_row(symbol, reason) for symbol in symbols))
 
         frame = frame or settings.timeframe
+        daily = self._daily_frame()
+        # Each row is a handful of provider round-trips, so rows are built
+        # concurrently with a bounded pool: the snapshot waits for the
+        # slowest symbol instead of the sum of every symbol, while a small
+        # worker count keeps a wide universe within the provider's rate
+        # limit. pool.map keeps the original symbol order.
+        workers = min(_MAX_ROW_WORKERS, max(1, len(symbols)))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="watchlist-row") as pool:
+                built = list(pool.map(
+                    lambda symbol: self._row(symbol, frame, daily), symbols))
+        else:
+            built = [self._row(symbol, frame, daily) for symbol in symbols]
         rows = []
         provider_state: str | None = None
         as_of: datetime | None = None
-        for symbol in symbols:
-            row, observed_state = self._row(symbol, frame)
+        for row, observed_state in built:
             rows.append(row)
             if observed_state is not None:
                 provider_state = observed_state
@@ -144,23 +174,38 @@ class WatchlistService:
             provider=settings.provider, provider_state=provider_state,
             timeframe=frame, as_of=as_of, rows=tuple(rows))
 
-    def _unavailable_row(self, symbol: str, reason: str) -> WatchlistRow:
+    def _unavailable_row(self, symbol: str, reason: str,
+                         timeframe: str | None = None) -> WatchlistRow:
         return WatchlistRow(
             symbol=symbol, state=UNPRICED, reason=reason,
             last_price=None, last_price_at=None, previous_close=None,
             change_percent=None, volume=None, ema=None, rsi=None, atr=None,
             indicator_state=INDICATORS_UNAVAILABLE, indicator_reason=reason,
-            bar_count=0, freshness=None, age_seconds=None)
+            bar_count=0, freshness=None, age_seconds=None, timeframe=timeframe)
 
-    def _row(self, symbol: str, timeframe: str) -> tuple[WatchlistRow, str | None]:
+    def _row(self, symbol: str, timeframe: str,
+             daily: str | None = None) -> tuple[WatchlistRow, str | None]:
         try:
             series = self._series.get(symbol, timeframe=timeframe)
+            # Weekend/holiday honesty: when the intraday window holds no bars
+            # at all, price and indicators come from the provider's completed
+            # daily bars instead - real historical data, labelled by the row's
+            # own timeframe so it is never presented as a live intraday quote.
+            if series.state is NO_DATA and timeframe in INTRADAY_FRAMES:
+                if daily is None:
+                    daily = self._daily_frame()
+                if daily is not None:
+                    retry = self._series.get(symbol, timeframe=daily,
+                                             days=self._daily_lookback_days)
+                    if retry.state is OK and retry.bars:
+                        series = retry
+                        timeframe = daily
         except ValueError as error:
-            return self._unavailable_row(symbol, str(error)), None
+            return self._unavailable_row(symbol, str(error), timeframe), None
         provider_state = series.provider_state
         if series.state is not OK:
             reason = series.reason or f"market data is {series.state}"
-            return self._unavailable_row(symbol, reason), provider_state
+            return self._unavailable_row(symbol, reason, timeframe), provider_state
         bars = series.bars
         last = bars[-1]
         previous_close = bars[-2].close if len(bars) > 1 else None
@@ -187,7 +232,11 @@ class WatchlistService:
             volume=last.volume, ema=ema_value, rsi=rsi_value, atr=atr_value,
             indicator_state=indicator_state, indicator_reason=indicator_reason,
             bar_count=len(bars), freshness=series.freshness,
-            age_seconds=series.age_seconds), provider_state
+            age_seconds=series.age_seconds, timeframe=timeframe), provider_state
+
+    def _daily_frame(self) -> str | None:
+        """The first daily frame the connected provider advertises, if any."""
+        return daily_frame_for(self._series)
 
     @property
     def timeframe(self) -> str | None:

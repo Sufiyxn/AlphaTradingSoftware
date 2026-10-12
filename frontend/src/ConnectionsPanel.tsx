@@ -8,12 +8,9 @@ type Section = {
   account_id_configured?: boolean; live_execution_available?: boolean; model?: string
   endpoint_configured?: boolean; enabled?: boolean; role?: string; destination_configured?: boolean
   last_successful_connection?: string | null
-  webhook_available?: boolean; secret_configured?: boolean; endpoint_status?: string
-  last_received_signal?: string | null; connection?: TestStatus; account_connection?: TestStatus
+  connection?: TestStatus; account_connection?: TestStatus
   capabilities?: unknown
-  endpoint?: string; ready?: boolean; state?: string; reason?: string | null
-  signals_accepted?: number; signals_rejected?: number; signals_duplicate?: number
-  allowed_strategies?: string[]; max_signal_age_seconds?: number; stale_after_seconds?: number
+  ready?: boolean; state?: string; reason?: string | null
   label?: string; implemented?: boolean; missing_credentials?: string[]
   connectivity?: {
     state?: string | null; reason?: string | null; checked_at?: string | null
@@ -32,7 +29,7 @@ type ExecutionConnection = {
 }
 type ExecutionProvider = { provider_id?: string; label?: string; implemented?: boolean; supported_modes?: string[] }
 type ExecutionGate = { paper_allowed?: boolean; live_allowed?: boolean; kill_switch_engaged?: boolean; manual_stop_engaged?: boolean }
-export type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; tradingview: Section; execution_connections: Section }
+export type Connections = { market_data: Section; trading_platform: Section; ai: Section; notifications: Section; execution_connections: Section }
 type Check = { key: string; label: string; status: string; passed: boolean; detail: string }
 export type Readiness = { status: string; live_mode: string; checks: Check[]; blockers: string[]; performance_qualification: string; measured_win_rate: number; evaluation_trades: number }
 
@@ -97,9 +94,6 @@ export default function ConnectionsPanel({ token, onLoad }: { token: string; onL
       ]} />
       <ConnectionCard title="Notifications" section="notifications" data={connections?.notifications} pending={pending} onTest={test} fields={[
         ['Provider', connections?.notifications.provider], ['Destination', fieldState(connections?.notifications.destination_configured)], ['Enabled', connections?.notifications.enabled ? 'Yes' : 'No'], ['Last successful', connections?.notifications.last_successful_connection ? new Date(connections.notifications.last_successful_connection).toLocaleString() : 'None'],
-      ]} />
-      <ConnectionCard title="TradingView" section="tradingview" data={connections?.tradingview} pending={pending} onTest={test} fields={[
-        ['Endpoint', connections?.tradingview.endpoint], ['Role', connections?.tradingview.role], ['Enabled', connections?.tradingview.enabled ? 'Yes' : 'No'], ['Secret configured', fieldState(connections?.tradingview.secret_configured)], ['State', connections?.tradingview.state], ['State detail', connections?.tradingview.reason ?? 'None'], ['Signals', `${connections?.tradingview.signals_accepted ?? 0} accepted · ${connections?.tradingview.signals_rejected ?? 0} rejected · ${connections?.tradingview.signals_duplicate ?? 0} duplicate`], ['Strategies', (connections?.tradingview.allowed_strategies ?? []).length ? connections?.tradingview.allowed_strategies?.join(', ') : 'Any allowed strategy'], ['Last signal', connections?.tradingview.last_received_signal || 'None'],
       ]} />
       <ConnectionCard title="Execution provider" section="execution" data={connections?.execution_connections} pending={pending} onTest={test} fields={[
         ['State', connections?.execution_connections.state], ['State detail', connections?.execution_connections.reason ?? 'None'], ['Connections', `${connections?.execution_connections.ready_count ?? 0} of ${connections?.execution_connections.count ?? 0} ready`], ['Paper trading', connections?.execution_connections.gate?.paper_allowed ? 'Available (in-process)' : 'Blocked'], ['Live trading', connections?.execution_connections.gate?.live_allowed ? 'Available' : 'Locked in this build'], ['Providers', providerList(connections?.execution_connections.providers)], ['Capabilities', capabilityList(connections?.execution_connections.connections?.flatMap((item) => item.capabilities ?? []))], ['Limitations', capabilityList(connections?.execution_connections.connections?.flatMap((item) => item.capability_limitations ?? []))],

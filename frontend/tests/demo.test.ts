@@ -19,24 +19,6 @@ import {
 } from '../src/demo.ts'
 import type { ActivityRow, ApiOrder } from '../src/demo.ts'
 
-const ALERT: ActivityRow = {
-  record_type: 'system',
-  timestamp: '2024-01-02T15:30:01+00:00',
-  symbol: 'AAPL',
-  event_type: 'TV_SIGNAL_RECEIVED',
-  message: 'TradingView entry signal accepted for AAPL (5 @ 50)',
-  context_json: {
-    signal_id: 'id:tv-1',
-    order_id: 'CLIENT-1',
-    symbol: 'AAPL',
-    action: 'ENTRY',
-    quantity: 5,
-    entry_price: 50,
-    status: 'accepted',
-    code: 'ACCEPTED',
-  },
-}
-
 const RISK_APPROVED: ActivityRow = {
   record_type: 'risk',
   timestamp: '2024-01-02T15:30:01+00:00',
@@ -67,7 +49,7 @@ const ORDER: ActivityRow = {
     order_id: 'CLIENT-1',
     status: 'FILLED',
     rejection_reason: null,
-    intent: { source: 'tradingview', signal_id: 'id:tv-1', quantity: 5 },
+    intent: { source: 'orchestrator', signal_id: 'id:cycle-7', quantity: 5 },
   },
 }
 
@@ -82,43 +64,17 @@ const FILL: ActivityRow = {
   message: 'executed 5 @ 50.01',
 }
 
-const DUPLICATE: ActivityRow = {
-  record_type: 'system',
-  timestamp: '2024-01-02T15:30:04+00:00',
-  symbol: 'AAPL',
-  event_type: 'TV_SIGNAL_DUPLICATE',
-  message: 'duplicate TradingView signal ignored',
-  context_json: { signal_id: 'id:tv-1', symbol: 'AAPL' },
-}
-
-const REJECTED: ActivityRow = {
-  record_type: 'system',
-  timestamp: '2024-01-02T15:32:00+00:00',
-  symbol: 'MSFT',
-  event_type: 'TV_SIGNAL_REJECTED',
-  message: 'TradingView signal rejected',
-  context_json: {
-    code: 'RISK_REJECTED',
-    reason: 'TRADE_RISK_EXCEEDED',
-    message: 'the signal was rejected by the risk engine',
-    signal_id: 'id:tv-2',
-  },
-}
-
-test('ledger narrates one accepted alert from alert to fill', () => {
-  const ledger = buildLedger([FILL, ORDER, RISK_APPROVED, ALERT])
+test('ledger narrates one approved decision from risk to fill', () => {
+  const ledger = buildLedger([FILL, ORDER, RISK_APPROVED])
   assert.deepEqual(
     ledger.map((step) => step.title),
-    ['Paper fill recorded', 'Order FILLED', 'Risk decision: APPROVED', 'TradingView alert accepted'],
+    ['Paper fill recorded', 'Order FILLED', 'Risk decision: APPROVED'],
   )
-  const alert = ledger[3]
-  assert.equal(alert.kind, 'alert')
-  assert.equal(alert.outcome, 'accepted')
-  assert.deepEqual(alert.identifiers, ['signal id:tv-1', 'order CLIENT-1', 'code ACCEPTED'])
+  const order = ledger[1]
+  assert.equal(order.kind, 'order')
+  assert.equal(order.detail, 'submitted by orchestrator', 'order context nests under intent')
+  assert.deepEqual(order.identifiers, ['signal id:cycle-7', 'order CLIENT-1'])
   assert.equal(ledger[0].identifiers.includes('fill fill-9'), true)
-  assert.equal(ledger[1].title, 'Order FILLED')
-  assert.equal(ledger[1].detail, 'submitted by tradingview', 'order context nests under intent')
-  assert.deepEqual(ledger[1].identifiers, ['signal id:tv-1', 'order CLIENT-1'])
   assert.equal(ledger[2].identifiers.includes('approved quantity 5'), true)
 })
 
@@ -130,37 +86,19 @@ test('ledger keeps the real rejection reason instead of a generic label', () => 
   assert.deepEqual(ledger[0].identifiers, ['code TRADE_RISK_EXCEEDED', 'approved quantity 0'])
 })
 
-test('ledger separates a refused duplicate from an accepted alert', () => {
-  const ledger = buildLedger([DUPLICATE, ALERT])
-  assert.equal(ledger[0].kind, 'duplicate')
-  assert.equal(ledger[0].outcome, 'duplicate')
-  assert.equal(ledger[0].title, 'Duplicate alert refused')
-  assert.equal(ledger[1].outcome, 'accepted')
-  assert.notEqual(ledger[0].outcome, ledger[1].outcome)
-})
-
-test('ledger surfaces a rejected signal with its backend code and message', () => {
-  const ledger = buildLedger([REJECTED])
-  assert.equal(ledger[0].kind, 'rejected')
-  assert.equal(ledger[0].outcome, 'rejected')
-  assert.equal(ledger[0].title, 'Alert rejected · TRADE_RISK_EXCEEDED')
-  assert.equal(ledger[0].detail, 'the signal was rejected by the risk engine')
-  assert.deepEqual(ledger[0].identifiers, ['signal id:tv-2', 'code RISK_REJECTED'])
-})
-
-test('ledger keeps signal events and errors, and drops unrelated journal noise', () => {
+test('ledger keeps decisions, fills and errors, and drops journal noise', () => {
   const ledger = buildLedger([
     { record_type: 'system', timestamp: '2024-01-02T15:30:00+00:00', event_type: 'RECONCILIATION_CLEAN' },
     { record_type: '', timestamp: '2024-01-02T15:40:00+00:00', message: 'ignored' },
     { record_type: 'error', timestamp: '2024-01-02T15:35:00+00:00', message: 'boom' },
-    { record_type: 'system', timestamp: '2024-01-02T15:36:00+00:00', event_type: 'TV_SIGNAL_RECEIVED', message: 'ok' },
+    { record_type: 'system', timestamp: '2024-01-02T15:36:00+00:00', event_type: 'ENGINE_CYCLE', message: 'ok' },
   ])
   assert.deepEqual(
     ledger.map((step) => step.kind),
-    ['alert', 'error'],
-    'newest first; only TradingView signal events and errors narrate the demo',
+    ['error'],
+    'newest first; system events and empty records stay in the journal panel, not the ledger',
   )
-  assert.equal(ledger[1].detail, 'boom')
+  assert.equal(ledger[0].detail, 'boom')
 })
 
 test('order views carry identifiers, fill history and an honest status tone', () => {
@@ -174,8 +112,8 @@ test('order views carry identifiers, fill history and an honest status tone', ()
     remaining_quantity: 6,
     average_fill_price: null,
     rejection_reason: null,
-    signal_id: 'id:tv-1',
-    source: 'tradingview',
+    signal_id: 'id:cycle-7',
+    source: 'orchestrator',
     created_at: '2024-01-02T15:30:02+00:00',
     fills: [
       { fill_id: 'fill-9', quantity: 4, price: 50.01, timestamp: '2024-01-02T15:30:03+00:00' },
@@ -190,7 +128,7 @@ test('order views carry identifiers, fill history and an honest status tone', ()
     remaining_quantity: 0,
     average_fill_price: null,
     rejection_reason: 'rejected by risk',
-    source: 'tradingview',
+    source: 'orchestrator',
     fills: [],
   }]
   const views = buildOrderViews(orders)
@@ -204,28 +142,25 @@ test('order views carry identifiers, fill history and an honest status tone', ()
 
 test('readiness reports blockers only from backend reasons', () => {
   const healthy = describeReadiness(
-    { tradingview: { ready: true, state: 'CONNECTED', endpoint: '/api/webhooks/tradingview', signals_accepted: 2, signals_rejected: 1, signals_duplicate: 1 } },
-    { mode: 'PAPER', market_data_provider: 'local', market_data_state: 'READY',
+    { mode: 'PAPER', market_data_provider: 'alpaca', market_data_state: 'READY',
       market_data_availability: 'CONNECTED', execution_adapter: 'paper', risk_kill_switch: false },
   )
-  assert.equal(healthy.webhook_ready, true)
+  assert.equal(healthy.market_data_availability, 'CONNECTED')
+  assert.equal(healthy.mode, 'PAPER')
   assert.equal(healthy.blockers.length, 0)
-  assert.equal(healthy.signals_accepted, 2)
 
-  const unconfigured = describeReadiness(
-    { tradingview: { ready: false, state: 'NOT_CONFIGURED', reason: 'the TradingView webhook is disabled; set TRADINGVIEW_ENABLED=true' } },
-    { mode: 'PAPER', market_data_availability: 'UNAVAILABLE', market_data_availability_reason: 'no quote has been observed' },
+  const stale = describeReadiness(
+    { mode: 'PAPER', market_data_availability: 'STALE',
+      market_data_availability_reason: 'every available quote is older than the configured staleness window' },
   )
-  assert.equal(unconfigured.webhook_ready, false)
-  assert.deepEqual(unconfigured.blockers, [
-    'TradingView webhook: the TradingView webhook is disabled; set TRADINGVIEW_ENABLED=true',
-    'Market data: no quote has been observed',
+  assert.deepEqual(stale.blockers, [
+    'Market data: every available quote is older than the configured staleness window',
   ])
 })
 
 test('readiness without data reports no invented blocker', () => {
-  const view = describeReadiness(null, null)
-  assert.equal(view.webhook_state, 'NOT_CONFIGURED')
+  const view = describeReadiness(null)
+  assert.equal(view.market_data_availability, 'NOT_CONFIGURED')
   assert.equal(view.mode, 'UNKNOWN')
   assert.deepEqual(view.blockers, [])
 })
@@ -265,10 +200,7 @@ test('live API: derived views match a running backend', { skip: !base }, async (
     assert.equal(step.detail.includes('undefined'), false)
   }
 
-  const readiness = describeReadiness(
-    connections as Record<string, unknown>,
-    status as Record<string, unknown>,
-  )
+  const readiness = describeReadiness(status as Record<string, unknown>)
   assert.notEqual(readiness.mode, 'UNKNOWN')
-  assert.equal(typeof readiness.webhook_ready, 'boolean')
+  assert.equal(typeof readiness.risk_kill_switch, 'boolean')
 })

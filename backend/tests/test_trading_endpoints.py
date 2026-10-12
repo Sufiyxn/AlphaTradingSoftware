@@ -114,9 +114,24 @@ class TradingEndpointTests(unittest.TestCase):
         runtime = build_runtime()
         server, port, thread = self.server(runtime)
         try:
+            # Before any cycle has completed the scanner is an honest empty
+            # state: loading it must not trigger a provider round-trip.
+            payload = self.get(port, "/api/scanner")
+            self.assertEqual(payload["symbols"], [])
+            self.assertEqual(payload["symbol_count"], 0)
+            self.assertEqual(payload["eligible_count"], 0)
+            self.assertIsNone(payload["as_of"])
+            self.assertIn("scan_note", payload)
+
+            # One real cycle later the page shows that cycle's own evidence:
+            # every symbol keeps its row, rejections with their reasons.
+            runtime.orchestrator._status = OrchestratorStatus.RUNNING
+            runtime.orchestrator.run_once()
             payload = self.get(port, "/api/scanner")
             universe = runtime.orchestrator.config.universe.symbols
             self.assertEqual(payload["symbol_count"], len(universe))
+            self.assertIsNotNone(payload["as_of"])
+            self.assertNotIn("scan_note", payload)
             self.assertEqual(payload["eligible_count"],
                              sum(1 for row in payload["symbols"] if row["eligible"]))
             for row in payload["symbols"]:

@@ -316,9 +316,15 @@ def order_from_dict(payload: dict) -> Order:
     """
     if not isinstance(payload, dict):
         raise ValueError("an order record must be a mapping")
-    intent = payload.get("intent") or {}
+    intent = payload.get("intent")
+    if not isinstance(intent, dict) or not intent:
+        # Rows written before the canonical lifecycle kept the same
+        # description under ``request`` instead of ``intent``. Both spellings
+        # describe one order, so a persisted order is never hidden from the
+        # store (and from the Orders page) just because the schema moved on.
+        intent = payload.get("request")
     if not isinstance(intent, dict):
-        raise ValueError("an order record must carry an intent")
+        raise ValueError("an order record must carry an intent or request")
     status = _status(payload.get("status"))
     created_at = _datetime(payload.get("created_at"))
     if created_at is None:

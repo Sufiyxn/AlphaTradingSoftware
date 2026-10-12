@@ -4,7 +4,7 @@ Covers the execution provider registry and interface, the connection manager
 lifecycle and honest states, credential redaction, capability discovery, the
 normalized order/status models, the paper/live boundary, multiple client
 connections, Connection Center + HTTP reporting, frontend/vendor separation,
-and the Phase 1-5 regression surface (TradingView, market data, RiskEngine).
+and the Phase 1-5 regression surface (market data, RiskEngine).
 """
 import json
 import re
@@ -786,7 +786,11 @@ class FrontendSeparationTests(unittest.TestCase):
     def test_frontend_never_calls_a_vendor_or_absolute_endpoint(self):
         forbidden_hosts = (
             "alpaca.markets", "paper-api.alpaca", "api.robinhood.com", "robinhood.com",
-            "polygon.io", "alphavantage.co", "api.tradingview.com",
+            "polygon.io", "alphavantage.co",
+            # No TradingView integration ships any more (retired 2026-10-12), but
+            # the frontend must never grow a call to it either: this host stays
+            # banned so a reintroduction fails the suite.
+            "api.tradingview.com",
         )
         absolute_fetch = re.compile(r"fetch\(\s*['\"]https?://", re.IGNORECASE)
         sources = sorted(ROOT.joinpath("frontend", "src").rglob("*.ts*"))
@@ -806,23 +810,6 @@ class FrontendSeparationTests(unittest.TestCase):
 
 class RegressionGuardTests(unittest.TestCase):
     """Phase 1-5 behaviour must stay intact with the framework in place."""
-
-    def test_tradingview_webhook_still_requires_risk_and_runs_local(self):
-        from backend.tradingview.auth import (
-            TradingViewAuthenticator,
-            WebhookAuthenticationError,
-        )
-        runtime = build_runtime(env={"TRADINGVIEW_ENABLED": "true",
-                                     "TRADINGVIEW_WEBHOOK_SECRET": "tv-secret"})
-        try:
-            self.assertFalse(runtime.tradingview.self_check()[0] is None)
-            authenticator = TradingViewAuthenticator("tv-secret")
-            with self.assertRaises(WebhookAuthenticationError):
-                authenticator.verify(b"{}", {"X-Webhook-Signature": "sha256=bad"})
-            authenticator.verify(b'{"secret": "tv-secret"}', {},
-                                 {"secret": "tv-secret"})
-        finally:
-            runtime.close()
 
     def test_market_data_domain_is_untouched_by_execution_connections(self):
         from backend.market_data.registry import is_implemented as market_implemented

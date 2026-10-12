@@ -12,6 +12,8 @@ class AnalysisContext:
     symbol: str
     bars: tuple[Bar, ...]
     timestamp: datetime
+    #: Bar timeframe the bars were fetched with, when the loader knows it.
+    timeframe: str | None = None
 
 
 class PerSymbolAnalyzer(Protocol):

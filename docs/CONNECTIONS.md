@@ -56,7 +56,7 @@ Center and the paper engine — the state the dashboard reports is the state ord
 `ExecutionRouter` remains available as a composable utility but is no longer on the production
 order path. See `docs/PIPELINE.md` for the step order and the deterministic rejection codes.
 
-No strategy, signal source, AI advisory, TradingView alert, or market-data provider ever learns a
+No strategy, signal source, AI advisory, or market-data provider ever learns a
 broker's name; everything downstream of risk consumes `TradingPlatformAdapter` only.
 
 ## Connection states
@@ -227,8 +227,8 @@ missing credentials, unknown provider, auth/connectivity/timeout/rate-limit/acco
 staleness, `CONNECTING`), capability discovery and limitations, the safety gate (paper allowed,
 live locked, kill switch), credentials redaction, three independent connections, order/status
 normalization, the Connection Center + HTTP endpoints, frontend/vendor separation (no vendor host
-and no absolute `fetch` anywhere in `frontend/src`), and Phase 1–5 regression guards (TradingView
-auth, market-data domain untouched, risk between decision and execution).
+and no absolute `fetch` anywhere in `frontend/src`), and Phase 1–5 regression guards (frontend
+vendor-host bans, market-data domain untouched, risk between decision and execution).
 
 Verification (Phase 6 checkpoint): `314 passed, 102 subtests`; `tsc --noEmit` clean;
 `npm run build` clean; no vendor calls; `git diff` reviewed. Committed at the Phase 6 checkpoint

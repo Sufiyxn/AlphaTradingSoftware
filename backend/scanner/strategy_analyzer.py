@@ -30,7 +30,7 @@ class StrategyAnalyzer:
                 direction=_direction(signal.direction), score=0.0,
                 entry_price=None, stop_price=None, target_price=None,
                 risk_per_share=None, reward_per_share=None, reward_risk_ratio=None,
-                reasons=reasons, valid=False,
+                reasons=reasons, valid=False, timeframe=context.timeframe,
             )
         ratio = setup.reward_risk_ratio
         valid = ratio is not None and ratio >= self._minimum_reward_risk
@@ -40,7 +40,7 @@ class StrategyAnalyzer:
             entry_price=setup.entry_price, stop_price=setup.stop_price,
             target_price=setup.target_price, risk_per_share=setup.risk_per_share,
             reward_per_share=setup.reward_per_share, reward_risk_ratio=ratio,
-            reasons=reasons, valid=valid,
+            reasons=reasons, valid=valid, timeframe=context.timeframe,
         )
 
 

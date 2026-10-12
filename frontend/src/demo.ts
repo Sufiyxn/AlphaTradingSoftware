@@ -2,7 +2,7 @@
  * Signal-desk derivations: turn real API records into the demo ledger.
  *
  * Every function here is pure. It only re-shapes what the backend already
- * recorded - `/api/activity`, `/api/orders`, `/api/connections`, `/api/status` -
+ * recorded - `/api/activity`, `/api/orders`, `/api/status` -
  * and it never invents a price, quantity, balance, fill, identifier or P&L.
  * Missing fields are reported as missing (``null`` / ``—``), not as zeroes.
  *
@@ -37,14 +37,10 @@ export type LedgerOutcome =
   | 'accepted'
   | 'approved'
   | 'rejected'
-  | 'duplicate'
   | 'error'
   | 'info'
 
 export type LedgerKind =
-  | 'alert'
-  | 'rejected'
-  | 'duplicate'
   | 'risk'
   | 'order'
   | 'fill'
@@ -105,14 +101,6 @@ export type OrderView = {
 }
 
 export type ReadinessView = {
-  webhook_state: string
-  webhook_reason: string | null
-  webhook_endpoint: string
-  webhook_ready: boolean
-  signals_accepted: number
-  signals_rejected: number
-  signals_duplicate: number
-  last_rejection_reason: string | null
   market_data_provider: string
   market_data_state: string
   market_data_availability: string
@@ -171,29 +159,11 @@ function stepFor(row: ActivityRow, index: number): LedgerStep | null {
   }
 
   if (type === 'system') {
-    const event = row.event_type ?? ''
-    // The ledger is the demo narrative, not the whole journal: only the
-    // TradingView signal events belong here. Everything else stays in the
-    // general "Recent trades and events" panel.
-    if (!event.startsWith('TV_SIGNAL_')) return null
-    const detail = row.message ?? ''
-    const identifiers = identifiersOf(row)
-    if (event === 'TV_SIGNAL_RECEIVED') {
-      return { ...base, kind: 'alert', outcome: 'accepted',
-               title: 'TradingView alert accepted', detail, identifiers }
-    }
-    if (event === 'TV_SIGNAL_REJECTED') {
-      const context = asRecord(row.context_json)
-      const code = text(context.reason) ?? text(context.code)
-      return { ...base, kind: 'rejected', outcome: 'rejected',
-               title: code ? `Alert rejected · ${code}` : 'Alert rejected',
-               detail: text(context.message) ?? detail, identifiers }
-    }
-    if (event === 'TV_SIGNAL_DUPLICATE') {
-      return { ...base, kind: 'duplicate', outcome: 'duplicate',
-               title: 'Duplicate alert refused', detail, identifiers }
-    }
-    return { ...base, kind: 'other', outcome: 'info', title: event, detail, identifiers }
+    // The ledger is the decision narrative, not the whole journal: system
+    // events (reconciliation, session notes, lifecycle messages) stay in the
+    // general "Recent trades and events" panel. What narrates here is what the
+    // platform itself decided: risk, orders, fills and errors.
+    return null
   }
 
   if (type === 'risk') {
@@ -244,8 +214,8 @@ function stepFor(row: ActivityRow, index: number): LedgerStep | null {
 }
 
 /**
- * Newest-first ledger of the records a presenter narrates: the alert, the risk
- * decision, the order, the fill, the refused duplicate and the rejection.
+ * Newest-first ledger of the records a presenter narrates: the risk decision,
+ * the order, the fill and the refusal behind a rejection.
  */
 export function buildLedger(rows: readonly ActivityRow[]): LedgerStep[] {
   const steps: LedgerStep[] = []
@@ -294,19 +264,9 @@ export function buildOrderViews(orders: readonly ApiOrder[]): OrderView[] {
  * backend itself reported - an absent field never becomes a warning.
  */
 export function describeReadiness(
-  connections: Record<string, unknown> | null | undefined,
   status: Record<string, unknown> | null | undefined,
 ): ReadinessView {
-  const webhook = asRecord(connections?.tradingview)
   const view: ReadinessView = {
-    webhook_state: text(webhook.state) ?? 'NOT_CONFIGURED',
-    webhook_reason: text(webhook.reason),
-    webhook_endpoint: text(webhook.endpoint) ?? '/api/webhooks/tradingview',
-    webhook_ready: webhook.ready === true,
-    signals_accepted: number(webhook.signals_accepted) ?? 0,
-    signals_rejected: number(webhook.signals_rejected) ?? 0,
-    signals_duplicate: number(webhook.signals_duplicate) ?? 0,
-    last_rejection_reason: text(webhook.last_rejection_reason),
     market_data_provider: text(status?.market_data_provider) ?? '—',
     market_data_state: text(status?.market_data_state) ?? 'UNKNOWN',
     market_data_availability: text(status?.market_data_availability) ?? 'NOT_CONFIGURED',
@@ -317,9 +277,6 @@ export function describeReadiness(
     blockers: [],
   }
 
-  if (!view.webhook_ready && view.webhook_reason) {
-    view.blockers.push(`TradingView webhook: ${view.webhook_reason}`)
-  }
   if (view.market_data_availability !== MARKET_DATA_CONNECTED
       && view.market_data_reason) {
     view.blockers.push(`Market data: ${view.market_data_reason}`)

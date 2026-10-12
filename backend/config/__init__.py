@@ -17,7 +17,6 @@ from .providers import (
     MarketDataSettings,
     NotificationChannelSettings,
     NotificationSettings,
-    TradingViewSettings,
 )
 from .settings import DEFAULT_UNIVERSE, Settings, TradingSettings
 
@@ -37,7 +36,6 @@ __all__ = [
     "NotificationSettings",
     "Settings",
     "TradingSettings",
-    "TradingViewSettings",
     "descriptor",
     "is_known",
     "is_selectable",

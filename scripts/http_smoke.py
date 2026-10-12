@@ -6,15 +6,17 @@ Run from the repository root:
 
 It boots `ApplicationRuntime` in-process on a free port with a temporary
 database (nothing under `data/` is touched), then exercises the HTTP surface
-the way a demo would: the documented endpoints parsed as JSON, a signed
-TradingView paper trade, the orders/positions/exports that trade shows up in,
-the owner-token guard, and a scan of every response body for the credentials
-the run itself configured.
+the way a demo would: the documented endpoints parsed as JSON, one paper trade
+submitted through the canonical pipeline (the same TradingPipeline every signal
+path travels), the orders/positions/exports that trade shows up in, the
+owner-token guard, proof that the retired TradingView webhook route is gone,
+and a scan of every response body for the credentials the run itself
+configured.
 
 No network is opened: market data is not attached, so nothing here can reach a
-vendor API (binding constraint 5). The webhook secret and owner token are
-generated per run - they are smoke credentials held in memory for the length of
-the process, never read from or written to disk, and never printed.
+vendor API (binding constraint 5) and no signal vendor exists to call. The
+owner token is generated per run - a smoke credential held in memory for the
+length of the process, never read from or written to disk, never printed.
 
 Exit status is 0 only when every check passed.
 """
@@ -36,14 +38,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from backend.config import load_config  # noqa: E402
 from backend.core.runtime import ApplicationRuntime  # noqa: E402
 from backend.core.server import create_server  # noqa: E402
-from backend.tradingview.auth import (  # noqa: E402
-    PAYLOAD_SECRET_FIELDS,
-    TradingViewAuthenticator,
-)
+from backend.pipeline.models import PipelineCode  # noqa: E402
+from backend.tests.pipeline_fixture import trade_setup  # noqa: E402
 
 CLOCK = datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc)
-SIGNAL_AT = "2024-01-02T15:29:00Z"
-ENDPOINT = "/api/webhooks/tradingview"
+SIGNAL_ID = "smoke-signal-1"
+IDEMPOTENCY_KEY = "smoke-intent-1"
+RETIRED_ROUTE = "/api/webhooks/tradingview"
 
 GET_PATHS = (
     "/api/status",
@@ -63,24 +64,15 @@ GET_PATHS = (
     "/api/logs?kind=fills",
 )
 
-WEBHOOK_BODY = {
-    "action": "buy",
-    "symbol": "AAPL",
-    "quantity": 5,
-    "price": 50.0,
-    "stop_loss": 48.0,
-    "take_profit": 54.0,
-    "timestamp": SIGNAL_AT,
-    "strategy": "tv_ema_cross",
-    "alert_id": "smoke-alert-1",
-}
+# Field names no response body may ever echo, whatever the payload was.
+SECRET_FIELDS = ("api_key", "api_secret", "owner_control_token",
+                 "webhook_secret")
 
 
 class Smoke:
-    def __init__(self, port: int, secrets_in_use: list[str], webhook_secret: str) -> None:
+    def __init__(self, port: int, secrets_in_use: list[str]) -> None:
         self.base = f"http://127.0.0.1:{port}"
         self.secrets_in_use = secrets_in_use
-        self.webhook_secret = webhook_secret
         self.results: list[tuple[str, bool, str]] = []
         self.bodies: list[str] = []
 
@@ -107,11 +99,6 @@ class Smoke:
             self.bodies.append(raw)
             return error.code, json.loads(raw)
 
-    def webhook_headers(self, body: bytes) -> dict:
-        digest = TradingViewAuthenticator(self.webhook_secret).signature(body)
-        return {"Content-Type": "application/json",
-                "X-Webhook-Signature": f"sha256={digest}"}
-
     def scan_for_secrets(self) -> None:
         haystack = "\n".join(self.bodies)
         for secret in self.secrets_in_use:
@@ -120,7 +107,7 @@ class Smoke:
             self.check(f"no response body contains {len(secret)}-char credential",
                        secret not in haystack)
         lowered = haystack.lower()
-        for field in PAYLOAD_SECRET_FIELDS:
+        for field in SECRET_FIELDS:
             self.check(f"no response echoes the field {field!r}",
                        f'"{field}"' not in lowered)
 
@@ -131,13 +118,8 @@ def main() -> int:
                         help="leave the server running until interrupted")
     options = parser.parse_args()
 
-    webhook_secret = secrets.token_hex(24)
     owner_token = secrets.token_urlsafe(32)
-    config = load_config(env={
-        "TRADINGVIEW_ENABLED": "true",
-        "TRADINGVIEW_WEBHOOK_SECRET": webhook_secret,
-        "OWNER_CONTROL_TOKEN": owner_token,
-    })
+    config = load_config(env={"OWNER_CONTROL_TOKEN": owner_token})
     database = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
     database.close()
     Path(database.name).unlink()
@@ -151,7 +133,7 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    smoke = Smoke(port, [webhook_secret, owner_token], webhook_secret)
+    smoke = Smoke(port, [owner_token])
     try:
         documents = {}
         for path in GET_PATHS:
@@ -176,12 +158,18 @@ def main() -> int:
         smoke.check("no position exists before the signal",
                     len((documents.get("/api/positions") or {}).get("positions", [])) == 0)
 
-        body = json.dumps(WEBHOOK_BODY).encode("utf-8")
-        accepted, payload = smoke.post(ENDPOINT, body, smoke.webhook_headers(body))
-        smoke.check("signed webhook accepts the signal", accepted == 202,
-                    f"{accepted} {payload.get('code')}")
-        smoke.check("the response carries the signal id",
-                    bool(payload.get("signal_id")))
+        # One paper trade through the canonical pipeline. The setup goes to the
+        # in-process paper engine, which runs the same TradingPipeline (risk
+        # evaluation, session gate, safety gate, paper adapter) that every
+        # other signal path travels - submitted here with no vendor in the
+        # loop, because none exists any more.
+        setup = trade_setup(timestamp=runtime.clock())
+        accepted = runtime.paper.submit(
+            setup, source="pipeline", signal_id=SIGNAL_ID,
+            idempotency_key=IDEMPOTENCY_KEY, requested_quantity=5)
+        smoke.check("the pipeline accepts a sound 2:1 setup",
+                    accepted.accepted and accepted.trade is not None,
+                    f"{accepted.code} {accepted.reason or ''}".strip())
 
         _, orders = smoke.get("/api/orders")
         smoke.check("the order is listed over HTTP", orders.get("count") == 1)
@@ -190,9 +178,9 @@ def main() -> int:
                     order.get("status") == "FILLED"
                     and order.get("filled_quantity") == 5
                     and len(order.get("fills", [])) == 1)
-        smoke.check("the order names the signal that raised it",
-                    order.get("source") == "tradingview"
-                    and bool(order.get("signal_id")))
+        smoke.check("the order names the pipeline that raised it",
+                    order.get("source") == "pipeline"
+                    and order.get("signal_id") == SIGNAL_ID)
 
         _, positions = smoke.get("/api/positions")
         open_positions = positions.get("positions", [])
@@ -210,30 +198,42 @@ def main() -> int:
         smoke.check("the durable fill journal is exported",
                     len(fill_rows) == 1)
         smoke.check("the exported fill names its source",
-                    (fill_rows[0].get("context_json") or {}).get("source") == "tradingview"
+                    (fill_rows[0].get("context_json") or {}).get("source") == "pipeline"
                     if fill_rows else False)
 
-        duplicate_body = json.dumps(WEBHOOK_BODY).encode("utf-8")
-        duplicate, payload = smoke.post(ENDPOINT, duplicate_body,
-                                        smoke.webhook_headers(duplicate_body))
-        smoke.check("a replayed signal is refused", duplicate == 409,
-                    f"{duplicate} {payload.get('code')}")
+        duplicate = runtime.paper.submit(
+            trade_setup(timestamp=runtime.clock()), source="pipeline",
+            signal_id=SIGNAL_ID, idempotency_key=IDEMPOTENCY_KEY,
+            requested_quantity=5)
+        smoke.check("a replayed intent is refused as a duplicate",
+                    duplicate.duplicate
+                    and duplicate.code == PipelineCode.DUPLICATE_INTENT,
+                    f"{duplicate.code}")
+        _, after_duplicate = smoke.get("/api/orders")
+        smoke.check("the duplicate booked no second order",
+                    after_duplicate.get("count") == 1,
+                    str(after_duplicate.get("count")))
 
-        unsigned = smoke.post(ENDPOINT, json.dumps(WEBHOOK_BODY).encode("utf-8"),
-                              {"Content-Type": "application/json"})
-        smoke.check("an unauthenticated signal is refused", unsigned[0] == 401)
+        # The retired TradingView webhook route must be gone: an unauthenticated
+        # POST to it is simply an unknown path, not a signal path with auth.
+        retired = smoke.post(RETIRED_ROUTE,
+                             json.dumps({"symbol": "AAPL"}).encode("utf-8"),
+                             {"Content-Type": "application/json"})
+        smoke.check("the retired TradingView webhook route answers 404",
+                    retired[0] == 404, str(retired[0]))
 
-        # An unsafe signal: the same entry with a 1:0.5 reward:risk, which the
+        # An unsafe setup: the same entry with a 1:0.5 reward:risk, which the
         # risk engine must refuse before any order exists.
-        unsafe_body = json.dumps({**WEBHOOK_BODY, "alert_id": "smoke-alert-unsafe",
-                                  "take_profit": 51.0}).encode("utf-8")
-        unsafe, unsafe_payload = smoke.post(ENDPOINT, unsafe_body,
-                                            smoke.webhook_headers(unsafe_body))
-        smoke.check("an unsafe signal is refused by risk", unsafe == 422
-                    and unsafe_payload.get("code") == "RISK_REJECTED",
-                    f"{unsafe} {unsafe_payload.get('code')}")
+        unsafe = runtime.paper.submit(
+            trade_setup(timestamp=runtime.clock(), target=51.0),
+            source="pipeline", signal_id="smoke-signal-unsafe",
+            idempotency_key="smoke-intent-unsafe", requested_quantity=5)
+        smoke.check("an unsafe setup is refused by risk",
+                    unsafe.code == PipelineCode.RISK_REJECTED
+                    and unsafe.trade is None,
+                    f"{unsafe.code}")
         smoke.check("the refusal names the failing risk rule",
-                    bool(unsafe_payload.get("reasons")))
+                    bool(unsafe.risk is not None and unsafe.risk.reasons))
         _, unchanged = smoke.get("/api/orders")
         smoke.check("the refused signal created no order", unchanged.get("count") == 1,
                     str(unchanged.get("count")))

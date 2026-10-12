@@ -8,7 +8,7 @@ Every production order travels this sequence, fail closed at each step::
     -> submit through the verified adapter -> normalize status
     -> record journal -> normalized result
 
-Nothing else in the product calls ``place_order``: TradingView, the
+Nothing else in the product calls ``place_order``: the scanner, the
 orchestrator, and the paper engine all hand an ``ExecutionIntent`` (or a
 pre-approved ``RiskDecision``) to this pipeline. The pipeline never fabricates
 a price, never re-implements risk rules (it asks ``RiskEngine``), never bypasses

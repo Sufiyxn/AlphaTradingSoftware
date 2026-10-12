@@ -1,7 +1,7 @@
 # Canonical Trading Pipeline & Risk Controls (Phases 7–9)
 
-The one path from an execution request to an order. Every signal source — a TradingView alert,
-the orchestrator's scanner cycle, an internal caller — hands an `ExecutionIntent` (or a
+The one path from an execution request to an order. Every signal source — the orchestrator's
+scanner cycle, an internal caller, an owner-triggered submission — hands an `ExecutionIntent` (or a
 pre-approved `RiskDecision`) to `PaperTradingEngine.submit_decision`, which runs it through
 `TradingPipeline`. Nothing else in the product calls `place_order`, and nothing reaches an
 adapter without an approved `RiskDecision` from the single `RiskEngine` inside the pipeline.
@@ -11,18 +11,18 @@ adapter without an approved `RiskDecision` from the single `RiskEngine` inside t
   (`models.py`, `lifecycle.py`, `store.py`, `provider.py`, `reconcile.py`, `cancellation.py`,
   `service.py`) — see `docs/ORDERS.md`
 - Entry point: `backend/paper_trading/engine.py` (`submit` / `execute` / `submit_decision`)
-- Signal paths: `backend/tradingview/service.py::_execute_entry`,
-  `backend/orchestrator/service.py::_run_cycle`
+- Signal paths: `backend/orchestrator/service.py::_run_cycle` and any caller of
+  `PaperTradingEngine.submit` (the former TradingView webhook path was retired on 2026-10-12)
 - Wiring: `backend/core/runtime.py` — the paper engine shares the runtime's
   `ConnectionManager`, so the Connection Center reports the same connection the orders use;
   `RiskEngine` is constructed with the loaded `RiskConfig` and the shared clock
 - Tests / proof: `backend/tests/test_pipeline.py`, `backend/tests/test_risk_hardening.py`,
-  `backend/tests/test_order_lifecycle.py`
+  `backend/tests/test_order_lifecycle.py`, `backend/tests/pipeline_fixture.py`
 
 ## Canonical flow
 
 ```
-signal source (TradingView alert | scanner cycle | internal)
+signal source (scanner cycle | internal submission)
   -> ExecutionIntent (setup + source + freshness + quantity cap + connection + idempotency key)
   -> PaperTradingEngine.submit_decision
   -> TradingPipeline
@@ -100,8 +100,10 @@ policy further.
 
 Refusals carry `PipelineCode.SESSION_BLOCKED`, are journaled through the normal
 `EXECUTION_REJECTED` event with that code and the calendar's reason, and create **no** order, so
-the same idempotency key can be retried legally in the next regular session. The webhook layer
-answers `422 SESSION_CLOSED` and deliberately does not remember the signal.
+the same idempotency key can be retried legally in the next regular session. The retired
+TradingView webhook layer used to answer `422 SESSION_CLOSED` and deliberately not remember the
+signal; since its removal on 2026-10-12 the caller receives `SESSION_BLOCKED` in the
+`PipelineResult`, and no caller remembers the refusal either.
 
 Checkpoint 2 extends the same decision to the scanner: `TradingOrchestrator` evaluates
 `session_gate` at the top of every cycle and, outside the allowed session, fetches no market
@@ -262,21 +264,13 @@ lists all 19 and a test asserts the set never drifts silently.
 
 ## How each signal path maps the result
 
-**TradingView** (`_execute_entry`) preserves its HTTP contract and maps codes:
-
-| Pipeline outcome | HTTP |
-|---|---|
-| `ACCEPTED` (trade booked) | `202 ACCEPTED` |
-| `SUBMITTED` (order open, not filled) | `503 EXECUTION_UNAVAILABLE` with `order_status=SUBMITTED` |
-| `STALE_SIGNAL` | `400 INVALID_PAYLOAD` / `STALE_TIMESTAMP` |
-| `INVALID_REQUEST` | `400 INVALID_PAYLOAD` |
-| risk not approved (`RISK_REJECTED`, `KILL_SWITCH`) | `422 RISK_REJECTED` with `reasons` |
-| `SESSION_BLOCKED` | `422 SESSION_CLOSED` with the calendar's reason; never remembered as a replay, because the same alert is legitimate in the next regular session |
-| anything else / no trade | `503 EXECUTION_UNAVAILABLE` with `order_status`/`rejection_reason` when an order exists |
-| unexpected exception | `500 INTERNAL_ERROR` |
-
-Replay/duplicate protection (`409 DUPLICATE_SIGNAL`) still happens in the webhook layer before
-the pipeline; the pipeline's own idempotency key (`signal_id`) is the second line of defence.
+**TradingView (retired 2026-10-12)**: the webhook that once mapped these codes to HTTP
+(`202 ACCEPTED`, `422 RISK_REJECTED`, `422 SESSION_CLOSED`, `409 DUPLICATE_SIGNAL`, ...) was
+removed together with `backend/tradingview/` and `backend/signals/`. The mapping is kept here
+only as history; what it protected is unchanged - the pipeline still refuses a duplicate
+idempotency key, an unsafe setup, and a submission outside the allowed session, each with its own
+code and journal row, and `scripts/http_smoke.py` proves all three against a live HTTP surface
+(the retired route itself now answers `404`).
 
 **Orchestrator**: reads the same result — approved trade booked → counts as approved;
 risk not approved → `_risk_rejected`; order present but not filled (including `SUBMITTED`) →

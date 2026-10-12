@@ -137,14 +137,14 @@ class JournalReportingTests(unittest.TestCase):
         self.assertTrue(self.repository.record_provider_fill(
             fill, order_id="ORD-1", client_order_id="ORD-1", symbol="AAA",
             connection_id="paper", provider_instance_id="inst-1",
-            context={"source": "tradingview", "signal_id": "sig-1"}))
+            context={"source": "pipeline", "signal_id": "sig-1"}))
 
         exports = LogExportService(self.repository)
         kinds = json.loads(exports.export("all"))
         recorded = [row for row in kinds if row["record_type"] == "fills"]
         self.assertEqual(len(recorded), 1, "a full export carries executions")
         self.assertEqual(recorded[0]["symbol"], "AAA")
-        self.assertEqual(recorded[0]["context_json"]["source"], "tradingview")
+        self.assertEqual(recorded[0]["context_json"]["source"], "pipeline")
         self.assertEqual(recorded[0]["context_json"]["signal_id"], "sig-1")
 
         only_fills = json.loads(exports.export("fills"))

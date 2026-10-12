@@ -39,7 +39,6 @@ class ConfigurationLayerTests(unittest.TestCase):
         self.assertFalse(config.market_data.configured)
         self.assertEqual(config.broker.provider, "none")
         self.assertFalse(config.broker.configured)
-        self.assertFalse(config.tradingview.configured)
         self.assertEqual(config.ai.provider, "local")
         self.assertTrue(config.ai.active)
 
@@ -111,7 +110,6 @@ class ConfigurationLayerTests(unittest.TestCase):
             "TRADING_PLATFORM_PROVIDER": "alpaca",
             "ALPACA_API_KEY": SENTINEL,
             "ALPACA_API_SECRET": SENTINEL,
-            "TRADINGVIEW_WEBHOOK_SECRET": SENTINEL,
             "AI_API_KEY": SENTINEL,
             "NOTIFICATION_WEBHOOK_URL": f"https://example.invalid/hook/{SENTINEL}",
             "DISCORD_WEBHOOK_URL": f"https://example.invalid/discord/{SENTINEL}",

@@ -12,6 +12,10 @@ type Candle = { time: number; open: number; high: number; low: number; close: nu
 type SeriesPayload = {
   symbol: string
   timeframe: string
+  /** Present only when the served frame differs from the requested one. */
+  requested_timeframe?: string
+  /** Why a different frame was served (session-aware daily fallback). */
+  fallback_reason?: string
   state: string
   reason: string | null
   provider: string | null
@@ -168,11 +172,17 @@ export default function ChartPanel({ symbol, onSymbolChange }: {
         {state}{payload?.freshness ? ` · ${payload.freshness}` : ''}{payload?.age_seconds != null ? ` · ${ageLabel(payload.age_seconds)} old` : ''}
       </span>
       <span className="count-badge">{payload?.bar_count ?? 0} candles</span>
+      {payload?.requested_timeframe && payload.requested_timeframe !== payload.timeframe && (
+        <span className="status-tag quiet" title={payload.fallback_reason ?? undefined}>
+          {payload.requested_timeframe} UNAVAILABLE · SERVED {payload.timeframe}
+        </span>
+      )}
       {payload?.truncated && <span className="status-tag quiet">TRUNCATED TO LATEST</span>}
       <span className="provider-chip">{payload?.provider ?? '—'} · {payload?.provider_state ?? '—'}</span>
     </div>
     <div className="chart-host" ref={hostRef} data-state={state} />
     {error && <p className="negative chart-note">{error}</p>}
+    {!error && payload?.fallback_reason && <p className="panel-foot chart-note">{payload.fallback_reason} Bars are labelled with the frame the provider actually returned.</p>}
     {!error && payload && state === 'NOT_CONFIGURED' && <p className="panel-foot chart-note">{payload.reason} · candles appear once a provider with credentials is connected in Connections &amp; Live Setup.</p>}
     {!error && payload && state === 'NO_DATA' && <p className="panel-foot chart-note">{payload.reason ?? 'No candles were returned for this symbol and window.'}</p>}
     {!error && payload && state === 'ERROR' && <p className="negative chart-note">{payload.reason ?? 'The provider could not serve this series.'}</p>}

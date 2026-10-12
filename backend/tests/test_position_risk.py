@@ -30,7 +30,6 @@ from backend.portfolio.models import PriceState
 from backend.tests.test_position_exits import (
     CLOCK,
     OWNER_TOKEN,
-    SECRET,
     build_runtime,
     open_position,
 )
@@ -268,7 +267,6 @@ class HttpRiskAdjustmentTests(unittest.TestCase):
                          self.runtime.portfolio.positions[0].average_entry_price)
         self.assertEqual(position["quantity"], 5)
         serialized = json.dumps(outcome)
-        self.assertNotIn(SECRET, serialized)
         self.assertNotIn(OWNER_TOKEN, serialized)
 
 

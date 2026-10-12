@@ -10,13 +10,12 @@ from backend.market_data.session import market_session
 
 
 class ConnectionCenter:
-    SECTIONS = {"market_data", "trading_platform", "ai", "notifications", "tradingview",
+    SECTIONS = {"market_data", "trading_platform", "ai", "notifications",
                 "execution"}
 
     def __init__(self, *, config, market_data, universe, execution, performance, portfolio,
                  risk, notifier, owner_controls_enabled, clock, repository=None,
-                 market_data_availability=None, tradingview_status=None,
-                 tradingview_check=None, execution_connections=None):
+                 market_data_availability=None, execution_connections=None):
         self.config = config
         self.market_data = market_data
         self.universe = universe
@@ -29,8 +28,6 @@ class ConnectionCenter:
         self.clock = clock
         self.repository = repository
         self._availability_source = market_data_availability
-        self._tradingview_status = tradingview_status
-        self._tradingview_check = tradingview_check
         self.execution_connections = execution_connections
         self.last_tests: dict[str, dict] = {}
         self.last_successful: dict[str, datetime] = {}
@@ -100,8 +97,8 @@ class ConnectionCenter:
                 "market_data_authority": "NONE",
                 "description": (
                     "Paper mode simulates cash, fills, positions, and P&L only. "
-                    "Prices always come from a connected market-data provider or a "
-                    "TradingView signal; this account never generates a price."),
+                    "Prices always come from a connected market-data provider; "
+                    "this account never generates a price."),
             },
             "ai": {
                 "provider": ai["provider"], "label": ai["label"], "model": ai["model"],
@@ -125,7 +122,6 @@ class ConnectionCenter:
                 "connection": self.last_tests.get("notifications", _never_tested()),
                 "last_successful_connection": self.last_successful.get("notifications"),
             },
-            "tradingview": self._tradingview_section(),
             "execution_connections": self._execution_section(),
         }
 
@@ -141,29 +137,6 @@ class ConnectionCenter:
                     "reason": "the connection manager is not attached to this runtime",
                     "connections": [], "providers": [], "gate": None}
         return self.execution_connections.describe()
-
-    def _tradingview_section(self) -> dict:
-        """Configuration plus live webhook state, never a credential value.
-
-        The webhook reports ``CONNECTED`` only after an authenticated signal
-        has actually been processed; a configured secret on its own reports
-        ``UNAVAILABLE`` (installed, no delivery observed yet) or
-        ``NOT_CONFIGURED``.
-        """
-        settings = self.config.tradingview.describe()
-        live = self._tradingview_status() if self._tradingview_status is not None else {}
-        section = {**settings, **live}
-        section.setdefault("state", "NOT_CONFIGURED")
-        section.setdefault("reason", None)
-        section.setdefault("endpoint_status", "NOT_INSTALLED")
-        section.setdefault("webhook_available", False)
-        section.setdefault("last_received_signal", None)
-        section.setdefault("signals_accepted", 0)
-        section.setdefault("signals_rejected", 0)
-        section.setdefault("signals_duplicate", 0)
-        section["connection"] = self.last_tests.get("tradingview", _never_tested())
-        section["last_successful_connection"] = self.last_successful.get("tradingview")
-        return section
 
     def _test_execution(self, tested_at: datetime) -> dict:
         """Run the connection-manager verification for every client connection.
@@ -259,17 +232,6 @@ class ConnectionCenter:
                                       f"Local notification sink is active ({names}); no external message was sent")
             else:
                 result = _not_configured(tested_at, "no notification channel is configured")
-        elif section == "tradingview":
-            tv = self.config.tradingview
-            if not tv.enabled or not tv.configured:
-                result = _not_configured(tested_at, "TradingView webhook is not configured; "
-                                                    "set TRADINGVIEW_ENABLED and TRADINGVIEW_WEBHOOK_SECRET")
-            elif self._tradingview_check is None:
-                result = _unsupported(tested_at, "the TradingView webhook endpoint is not installed; "
-                                                 "no endpoint was opened")
-            else:
-                passed, detail = self._tradingview_check()
-                result = _test_result(passed, tested_at, detail)
         elif section == "execution":
             result = self._test_execution(tested_at)
         else:

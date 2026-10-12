@@ -358,9 +358,11 @@ booking exactly once, the observer announcing only new-and-durable fills (with a
 cash and quantity the fills describe with a post-restart replay booking nothing, a durable fill
 no trade accounts for being reported instead of invented, the no-journal path still booking, and
 an order that can no longer fill keeping nothing.
-`test_tradingview_webhook.py` adds the demo evidence: the fill row's `source`/`signal_id`,
-`GET /api/activity` carrying executions and risk decisions, and the webhook order, its
-executions, and its position served over HTTP after a restart; `test_journal_reporting.py`
+`backend/tests/pipeline_fixture.py` and `backend/tests/test_position_exits.py` now carry that
+demo evidence for the canonical path: the fill row's `source`/`signal_id`, `GET /api/activity`
+carrying executions and risk decisions, and the paper order, its executions, and its position
+served over HTTP after a restart (the `test_tradingview_webhook.py` that used to hold it was
+deleted with the TradingView integration on 2026-10-12); `test_journal_reporting.py`
 holds the fill export.
 
 Verification (Phase 10 checkpoint 3): `523 passed, 150 subtests`.

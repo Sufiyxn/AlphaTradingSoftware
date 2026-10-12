@@ -158,11 +158,17 @@ class DecisionLedgerTests(unittest.TestCase):
         orchestrator = make_orchestrator(clock=lambda: saturday)
         result = orchestrator.run_once()
         self.assertTrue(result.session_skipped)
-        self.assertEqual(len(result.decisions), 1)
-        decision = result.decisions[0]
-        self.assertEqual((decision.stage, decision.outcome), (SESSION, SKIPPED))
-        self.assertTrue(decision.reasons)
-        self.assertIsNone(decision.symbol)
+        self.assertEqual(result.errors, (), "a closed market is not an error")
+        # Completed bars are still analyzed; the entry itself is refused.
+        self.assertEqual(result.approved_trades, (),
+                         "nothing is submitted while entries are blocked")
+        self.assertEqual([(d.stage, d.outcome) for d in result.decisions],
+                         [(SESSION, SKIPPED), (SESSION, REJECTED)])
+        cycle_decision, entry_decision = result.decisions
+        self.assertTrue(cycle_decision.reasons)
+        self.assertIsNone(cycle_decision.symbol)
+        self.assertEqual(entry_decision.symbol, "AAA")
+        self.assertTrue(entry_decision.reasons)
 
 
 class DecisionRecoveryTests(unittest.TestCase):

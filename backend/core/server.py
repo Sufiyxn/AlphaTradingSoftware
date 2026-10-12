@@ -10,6 +10,8 @@ from .config import load_config
 from .runtime import ApplicationRuntime
 from backend.backtesting import BacktestEngine
 from backend.market_data.session import market_session
+from backend.market_data.series import NO_DATA, OK
+from backend.scanner.service import INTRADAY_FRAMES, daily_frame_for
 
 
 def create_server(runtime: ApplicationRuntime, host: str, port: int) -> ThreadingHTTPServer:
@@ -32,6 +34,18 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 raise ValueError("request body must be a JSON object")
             return value
 
+        def _drain(self):
+            """Read and discard whatever body the client already sent.
+
+            Answering before the request body is consumed lets the server's
+            close reset a socket the client is still writing to, which shows up
+            in the client as a mid-request ConnectionAbortedError instead of
+            the response that was actually produced.
+            """
+            length = min(int(self.headers.get("Content-Length", "0")), 16384)
+            if length > 0:
+                self.rfile.read(length)
+
         def do_OPTIONS(self):
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5173")
@@ -48,7 +62,12 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 elif path == "/api/status":
                     result = runtime.status()
                 elif path == "/api/opportunities":
-                    result = {"opportunities": runtime.scanner.scan(runtime.orchestrator.config.universe)}
+                    # The ranked candidates of the last completed cycle; a
+                    # read must never trigger a provider round-trip.
+                    detail = runtime.orchestrator.last_scan()
+                    result = {"opportunities": (detail or {}).get("ranked", []),
+                              "as_of": (detail or {}).get("as_of"),
+                              "source": "last_completed_cycle"}
                 elif path == "/api/quotes":
                     market = runtime.market_data.status
                     result = {"provider": market.get("provider"),
@@ -58,10 +77,9 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                               "quotes": runtime.market_data.get_latest(
                                   runtime.orchestrator.config.universe.symbols)}
                 elif path == "/api/candles":
-                    result = runtime.market_series.get(
-                        _one(query, "symbol") or "",
-                        timeframe=_one(query, "timeframe"),
-                        days=_float_param(query, "days")).payload()
+                    result = _candles_payload(
+                        runtime, _one(query, "symbol") or "",
+                        _one(query, "timeframe"), _float_param(query, "days"))
                 elif path == "/api/watchlist":
                     result = runtime.watchlist.snapshot().payload()
                 elif path == "/api/scanner":
@@ -168,12 +186,9 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
 
         def do_POST(self):
             parsed = urlparse(self.path)
-            if parsed.path == "/api/webhooks/tradingview":
-                # Dedicated webhook authentication: this path never requires
-                # X-Owner-Token and never falls through to owner controls.
-                return self._tradingview_webhook()
             controls = runtime.owner_controls
             if controls is None:
+                self._drain()
                 return self._send(503, {"error": "owner controls are disabled; set OWNER_CONTROL_TOKEN and restart"})
             token = self.headers.get("X-Owner-Token")
             try:
@@ -212,6 +227,23 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                     status = 200 if outcome.get("changed") else (
                         404 if outcome.get("code") == "POSITION_NOT_FOUND" else 400)
                     return self._send(status, outcome)
+                if parsed.path == "/api/control/scan-now":
+                    # Owner-triggered single cycle: useful when the engine is
+                    # stopped, and identical to the loop's own cycle - the
+                    # response carries the real outcome plus the cached rows
+                    # the scanner page reads.
+                    controls.authorize_owner(token)
+                    outcome = runtime.orchestrator.run_once()
+                    return self._send(200, {
+                        "status": "ok",
+                        "cycle": outcome.cycle,
+                        "session_blocked": outcome.session_skipped,
+                        "candidates": len(outcome.candidates),
+                        "approved": len(outcome.approved_trades),
+                        "rejected": outcome.rejected_count,
+                        "errors": list(outcome.errors),
+                        "scanner": _scanner_payload(runtime),
+                    })
                 actions = {
                     "/api/control/start": lambda: controls.start(token),
                     "/api/control/stop": lambda: controls.stop(token),
@@ -232,30 +264,6 @@ def create_server(runtime: ApplicationRuntime, host: str, port: int) -> Threadin
                 self._send(401, {"error": str(error)})
             except Exception as error:
                 self._send(400, {"error": str(error)})
-
-        def _tradingview_webhook(self):
-            """POST /api/webhooks/tradingview - authenticated signal ingestion."""
-            try:
-                raw_length = (self.headers.get("Content-Length") or "0").strip()
-                try:
-                    length = int(raw_length)
-                except ValueError:
-                    return self._send(400, {"status": "error", "code": "INVALID_PAYLOAD",
-                                            "message": "Content-Length must be an integer"})
-                if length < 0:
-                    return self._send(400, {"status": "error", "code": "INVALID_PAYLOAD",
-                                            "message": "Content-Length must not be negative"})
-                limit = runtime.tradingview.max_body_bytes
-                if length > limit:
-                    return self._send(413, {"status": "error", "code": "PAYLOAD_TOO_LARGE",
-                                            "message": f"request body exceeds {limit} bytes"})
-                raw = self.rfile.read(length) if length else b""
-                response = runtime.tradingview.handle(raw, self.headers)
-                return self._send(response.status, response.body)
-            except Exception:
-                logging.getLogger(__name__).exception("TradingView webhook request failed")
-                return self._send(500, {"status": "error", "code": "INTERNAL_ERROR",
-                                        "message": "the webhook failed to process the signal"})
 
         def log_message(self, format, *args):
             return
@@ -323,46 +331,89 @@ def _float_param(query, key):
         raise ValueError(f"{key} must be a number")
 
 
-def _scanner_payload(runtime: ApplicationRuntime) -> dict:
-    """Per-symbol scan outcomes, including the rejections and their reasons.
+def _candles_payload(runtime: ApplicationRuntime, symbol: str,
+                     timeframe, days) -> dict:
+    """Validated candles for the chart, with the same session-aware fallback.
 
-    The engine's candidates are the ranked ones, but a scanner that only
-    shows its winners cannot explain itself; every analyzed symbol is listed
-    with its opportunity (valid or not) and any data failure.
+    A closed session produces no intraday bars, so a healthy provider answers
+    an intraday request with an empty window. Instead of leaving the chart
+    blank, the chart is served the provider's *completed daily* bars - real
+    historical data - and the payload records both the frame that was asked
+    for and why the answer is on another one, so the UI can label it as
+    historical rather than pretend the session produced fresh candles.
     """
-    universe = runtime.orchestrator.config.universe
+    series = runtime.market_series.get(symbol, timeframe=timeframe, days=days)
+    payload = series.payload()
+    if series.state is not NO_DATA or payload["timeframe"] not in INTRADAY_FRAMES:
+        return payload
+    daily = daily_frame_for(runtime.market_series)
+    if daily is None:
+        return payload
+    lookback = runtime.orchestrator.config.history_lookback
+    window = days if days is not None else lookback.total_seconds() / 86400
+    retry = runtime.market_series.get(symbol, timeframe=daily, days=window)
+    if retry.state is not OK:
+        return payload
+    served = retry.payload()
+    served["requested_timeframe"] = payload["timeframe"]
+    served["fallback_reason"] = (
+        f"no {payload['timeframe']} bars exist for this window while the "
+        f"session is closed; showing the latest completed {daily} bars instead")
+    return served
+
+
+def _scanner_payload(runtime: ApplicationRuntime) -> dict:
+    """Per-symbol outcomes of the *last completed* cycle - never a live scan.
+
+    A page load must not trigger a provider round-trip: the scanner reports
+    genuine engine state with its ``as_of`` stamp (or an honest empty state
+    before the first cycle), plus the live session and provider facts that
+    need no network call. Every analyzed symbol keeps its row - including the
+    rejections and their reasons - because a scanner that only shows its
+    winners cannot explain itself.
+    """
     market = runtime.market_data.status
-    detailed = getattr(runtime.scanner, "scan_detailed", None)
-    if callable(detailed):
-        ranked, symbol_results = detailed(universe)
-        rows = [_scanner_row(item.symbol, item.opportunity, item.error)
-                for item in symbol_results]
-    else:
-        ranked, rows = tuple(runtime.scanner.scan(universe)), []
-    seen = {row["symbol"] for row in rows}
-    for opportunity in ranked:
-        if opportunity.symbol not in seen:
-            rows.append(_scanner_row(opportunity.symbol, opportunity, None))
-            seen.add(opportunity.symbol)
-    return {
+    state = runtime.orchestrator.state
+    detail = runtime.orchestrator.last_scan()
+    payload = {
         "provider": market.get("provider"),
         "provider_state": market.get("state"),
         "market_session": market_session(runtime.clock()).state,
-        "eligible_count": len(ranked),
-        "symbol_count": len(rows),
-        "symbols": rows,
+        "eligible_count": 0,
+        "symbol_count": 0,
+        "symbols": [],
+        "engine_status": state.status,
+        "cycle": state.current_cycle,
+        "as_of": None,
+        "session_blocked": state.session_blocked,
+        "session_reason": state.session_reason,
+        "last_scan_timestamp": (state.last_scan_timestamp.isoformat()
+                                if state.last_scan_timestamp else None),
+        "candidates_found": state.candidates_found,
+        "candidates_rejected": state.candidates_rejected,
+        "trades_approved": state.trades_approved,
+        "trades_rejected_by_risk": state.trades_rejected_by_risk,
+        "data_stale_rejected": state.data_stale_rejected,
+        "errors": list(state.errors),
     }
-
-
-def _scanner_row(symbol: str, opportunity, error: str | None) -> dict:
-    return {
-        "symbol": symbol,
-        "error": error,
-        "eligible": bool(opportunity is not None and opportunity.valid
-                         and opportunity.direction.value != "NONE"
-                         and opportunity.reward_risk_ratio is not None),
-        "opportunity": opportunity,
-    }
+    if detail is None:
+        payload["scan_note"] = (
+            "no cycle has completed yet; start the engine from the Control page")
+        return payload
+    payload.update({
+        "eligible_count": detail["eligible_count"],
+        "symbol_count": detail["symbol_count"],
+        "symbols": detail["symbols"],
+        "cycle": detail["cycle"],
+        "as_of": detail["as_of"],
+        "session_blocked": not detail["session_allowed"],
+        "session_reason": detail["session_reason"],
+        "scan_rejected_count": detail["rejected_count"],
+        "scan_error_count": detail["error_count"],
+        "bar_timeframe": next(
+            (row["timeframe"] for row in detail["symbols"] if row["timeframe"]), None),
+    })
+    return payload
 
 
 def _date_param(query, key):
@@ -391,11 +442,18 @@ def main() -> None:
     if runtime.owner_controls is not None:
         runtime.owner_controls._shutdown = server.shutdown
     started = runtime.start_market_stream()
+    # The local signal generator is part of the application lifecycle: a
+    # restart resumes scanning without an owner click, while construction
+    # itself never starts a worker (tests keep full control of cycles).
+    engine_started = runtime.start_trading_engine()
     stream = runtime.market_stream_status()
     print(f"Alpha Trading PAPER API listening at http://{settings.host}:{settings.port}/api/health")
     print(f"Market-data stream: {stream.get('state')}"
           + (f" - {stream.get('reason')}" if stream.get("reason") else "")
           + ("" if started else " (not started)"))
+    print(f"Trading engine: {'scanning in the background' if engine_started else runtime.orchestrator.state.status}"
+          + (f" ({runtime.orchestrator.state.session_reason})"
+             if runtime.orchestrator.state.session_reason else ""))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -22,7 +22,6 @@ type StatusSlice = {
 
 type OrdersPayload = { orders?: ApiOrder[]; count?: number }
 type ActivityPayload = { events?: ActivityRow[] }
-type ConnectionsPayload = Record<string, unknown>
 type PositionSlice = {
   symbol?: string
   quantity?: number
@@ -38,7 +37,6 @@ const time = (s?: string | null) => (s ? new Date(s).toLocaleString() : '—')
 export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; onLoad?: (result: PanelLoad<SignalDeskSnapshot>) => void }) {
   const [orders, setOrders] = useState<OrderView[]>([])
   const [ledger, setLedger] = useState<LedgerStep[]>([])
-  const [connections, setConnections] = useState<ConnectionsPayload | null>(null)
   const [positions, setPositions] = useState<PositionSlice[]>([])
   const [error, setError] = useState('')
   const onLoadRef = useRef(onLoad)
@@ -49,21 +47,19 @@ export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; o
       const responses = await Promise.all([
         fetch('/api/orders'),
         fetch('/api/activity?limit=200'),
-        fetch('/api/connections'),
         fetch('/api/positions'),
       ])
       if (responses.some((response) => !response.ok)) {
         throw new Error('order and activity records are unavailable')
       }
-      const [orderPayload, activityPayload, connectionPayload, positionPayload] =
+      const [orderPayload, activityPayload, positionPayload] =
         await Promise.all(responses.map((response) => response.json())) as [
-          OrdersPayload, ActivityPayload, ConnectionsPayload, PositionsPayload,
+          OrdersPayload, ActivityPayload, PositionsPayload,
         ]
       const orderViews = buildOrderViews(orderPayload.orders ?? [])
       const ledgerSteps = buildLedger(activityPayload.events ?? [])
       setOrders(orderViews)
       setLedger(ledgerSteps)
-      setConnections(connectionPayload)
       setPositions(positionPayload.positions ?? [])
       setError('')
       onLoadRef.current?.({ data: { orders: orderViews, ledger: ledgerSteps }, error: '' })
@@ -80,7 +76,7 @@ export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; o
     return () => window.clearInterval(timer)
   }, [refresh])
 
-  const readiness: ReadinessView = describeReadiness(connections, status)
+  const readiness: ReadinessView = describeReadiness(status)
   const positionBySymbol = new Map(
     positions.filter((item) => typeof item.symbol === 'string')
       .map((item) => [item.symbol as string, item]),
@@ -90,12 +86,12 @@ export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; o
     <section className="panel recent-panel" id="orders">
       <div className="panel-head">
         <div>
-          <p className="eyebrow">TRADINGVIEW SIGNAL DESK · PAPER EXECUTION</p>
-          <h2>Alerts, risk decisions, orders and fills</h2>
+          <p className="eyebrow">ORDER DESK · PAPER EXECUTION</p>
+          <h2>Risk decisions, orders and fills</h2>
         </div>
         <div className="log-tools">
-          <span className={`status-tag ${readiness.webhook_ready ? 'good' : 'quiet'}`}>
-            WEBHOOK {readiness.webhook_state}
+          <span className={`status-tag ${readiness.market_data_availability === 'CONNECTED' ? 'good' : 'quiet'}`}>
+            MARKET DATA {readiness.market_data_availability}
           </span>
           <a className="text-link" href="/api/logs?kind=fills&amp;format=json" target="_blank" rel="noreferrer">
             Fills JSON ↗
@@ -108,23 +104,23 @@ export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; o
 
       <div className="readiness-summary">
         <span>
-          Webhook: <b>{readiness.webhook_state}</b> · {readiness.signals_accepted} accepted ·{' '}
-          {readiness.signals_rejected} rejected · {readiness.signals_duplicate} duplicate
-        </span>
-        <span>
           Market data: <b>{readiness.market_data_availability}</b> · {readiness.market_data_provider}
         </span>
         <span>
           Mode: <b>{readiness.mode}</b> · execution {readiness.execution_adapter}
         </span>
+        <span>
+          Risk kill switch: <b>{readiness.risk_kill_switch ? 'ENGAGED' : 'off'}</b>
+        </span>
       </div>
       <p className="readiness-copy">
-        Endpoint {readiness.webhook_endpoint} authenticates each alert with an HMAC shared secret.
-        TradingView is a signal source only: it is never a broker, a market-data provider, or a price source.
-        {readiness.last_rejection_reason && <> Last rejection: <b>{readiness.last_rejection_reason}</b>.</>}
+        Every order on this page was submitted through the canonical trading pipeline:
+        intent validation, connection verification, the risk engine, the execution
+        safety gate, then the local paper adapter. A signal is metadata, never a price.
+        {readiness.market_data_reason && <> Market data: <b>{readiness.market_data_reason}</b>.</>}
       </p>
 
-      {error && <div className="alert danger">Signal desk unavailable: {error}.</div>}
+      {error && <div className="alert danger">Order desk unavailable: {error}.</div>}
       {readiness.blockers.map((blocker) => (
         <div className="alert" key={blocker}>{blocker}</div>
       ))}
@@ -193,7 +189,7 @@ export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; o
       <div className="panel-head">
         <div>
           <p className="eyebrow">WHAT THE PRESENTER NARRATES</p>
-          <h3>Signal ledger</h3>
+          <h3>Decision ledger</h3>
         </div>
         <span className="count-badge">{ledger.length}</span>
       </div>
@@ -222,15 +218,15 @@ export default function SignalDesk({ status, onLoad }: { status?: StatusSlice; o
                 </td>
               </tr>
             ))}
-            {!ledger.length && <Empty span={5} text="No signal, risk, order or fill records exist yet." />}
+            {!ledger.length && <Empty span={5} text="No risk decision, order or fill record exists yet." />}
           </tbody>
         </table>
       </div>
 
       <p className="panel-foot">{PAPER_NOTICE}</p>
       <p className="panel-foot">
-        Every row above is read from the local SQLite journal through <code>/api/orders</code>,{' '}
-        <code>/api/activity</code> and <code>/api/connections</code>. Nothing on this screen is generated
+        Every row above is read from the local SQLite journal through <code>/api/orders</code> and{' '}
+        <code>/api/activity</code>. Nothing on this screen is generated
         by the browser, and unpriced values stay unpriced.
       </p>
     </section>

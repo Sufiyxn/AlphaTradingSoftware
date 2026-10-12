@@ -13,7 +13,7 @@ from .provider import MockTradingPlatformAdapter
 
 NO_PRICE_REASON = (
     "paper execution does not supply market prices; "
-    "submit a price obtained from a real market-data provider or TradingView signal"
+    "submit a price obtained from a real market-data provider or signal path"
 )
 
 
@@ -54,7 +54,7 @@ class LocalPaperAdapter(MockTradingPlatformAdapter):
     def get_quote(self, symbol: str):
         raise NotImplementedError(
             "paper execution does not provide market data; "
-            "connect a market-data provider or TradingView signal source")
+            "connect a market-data provider or a signal path that supplies prices")
 
     def place_order(self, request: OrderRequest) -> Order:
         price = request.limit_price if request.limit_price is not None else request.stop_price

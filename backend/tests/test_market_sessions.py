@@ -31,6 +31,7 @@ from backend.market_data.session import (
     normalize_session_policy,
     session_gate,
 )
+from backend.orchestrator.decisions import REJECTED, SESSION
 from backend.pipeline import ExecutionIntent, PipelineCode
 from backend.portfolio import Portfolio
 from backend.tests.test_pipeline import SpyAdapter, SpyRisk, make_manager
@@ -299,42 +300,40 @@ class SessionConfigurationTests(unittest.TestCase):
         self.assertEqual(SESSION_POLICIES, ("regular", "extended"))
 
 
-class WebhookSessionContractTests(unittest.TestCase):
-    """The external contract: what a TradingView alert is told, and when."""
+class SignalSessionContractTests(unittest.TestCase):
+    """The external contract for a submitted setup: what the pipeline answers,
+    and when - refused with the calendar's code while entries are blocked,
+    accepted once the exchange reopens, and never remembered as a duplicate."""
 
     def _runtime(self, at, **env):
-        from backend.tests.test_tradingview_webhook import build_runtime
-        return build_runtime(clock=lambda: at, env=env or None)
+        from backend.core.runtime import ApplicationRuntime
+        return ApplicationRuntime(database_path=":memory:", owner_token=None,
+                                  clock=lambda: at, config=load_config(env=dict(env)))
 
-    def _payload(self, at, **overrides):
-        from backend.tests.test_tradingview_webhook import payload
-        body = dict(timestamp=at.isoformat().replace("+00:00", "Z"))
-        body.update(overrides)
-        return payload(**body)
+    def _submit(self, runtime, at):
+        from backend.tests.pipeline_fixture import submit, trade_setup
+        return submit(runtime, trade_setup(timestamp=at))
 
-    def test_a_closed_session_is_answered_422_and_never_remembered(self):
-        from backend.tests.test_tradingview_webhook import order_rows, send
+    def test_a_closed_session_is_answered_session_blocked_and_never_remembered(self):
         saturday = utc(2026, 10, 10, 15, 0)
         runtime = self._runtime(saturday)
         try:
-            response = send(runtime, self._payload(saturday))
-            self.assertEqual(response.status, 422, response.body)
-            self.assertEqual(response.body["code"], "SESSION_CLOSED")
-            self.assertEqual(response.body["status"], "rejected")
-            self.assertIn("closed", response.body["message"].lower())
-            self.assertEqual(len(order_rows(runtime)), 0,
-                             "a closed-session alert must create no order")
+            result = self._submit(runtime, saturday)
+            self.assertEqual(result.code, PipelineCode.SESSION_BLOCKED, result.reason)
+            self.assertFalse(result.accepted)
+            self.assertIsNone(result.order,
+                              "a closed-session submission must create no order")
             self.assertEqual(len(runtime.portfolio.positions), 0)
         finally:
             runtime.close()
 
-    def test_the_same_alert_is_accepted_in_the_next_regular_session(self):
-        from backend.tests.test_tradingview_webhook import order_rows, send
+    def test_the_same_setup_is_accepted_in_the_next_regular_session(self):
         saturday = utc(2026, 10, 10, 15, 0)
         runtime = self._runtime(saturday)
         try:
-            self.assertEqual(send(runtime, self._payload(saturday)).status, 422)
-            self.assertEqual(len(order_rows(runtime)), 0,
+            self.assertEqual(self._submit(runtime, saturday).code,
+                             PipelineCode.SESSION_BLOCKED)
+            self.assertEqual(len(runtime.repository.rows("orders")), 0,
                              "a refusal must not be remembered as a duplicate")
         finally:
             runtime.close()
@@ -342,9 +341,9 @@ class WebhookSessionContractTests(unittest.TestCase):
         monday = utc(2026, 10, 12, 14, 0)
         runtime = self._runtime(monday)
         try:
-            response = send(runtime, self._payload(monday))
-            self.assertEqual(response.status, 202, response.body)
-            self.assertEqual(len(order_rows(runtime)), 1)
+            result = self._submit(runtime, monday)
+            self.assertTrue(result.accepted, f"{result.code}: {result.reason}")
+            self.assertEqual(len(runtime.repository.rows("orders")), 1)
         finally:
             runtime.close()
 
@@ -383,7 +382,9 @@ class WebhookSessionContractTests(unittest.TestCase):
 
 
 class OrchestratorSessionTests(unittest.TestCase):
-    """Checkpoint 2: the scanner does no work when no entry could act."""
+    """The session gate blocks *entries*, never analysis: completed bars are
+    scanned in every session, and each setup found while entries are blocked
+    is refused once with the calendar's reason instead of being submitted."""
 
     def _orchestrator(self, clock, *, symbols=("AAA",), session_submission="regular",
                       provider_extended_hours=None, journal=None):
@@ -422,7 +423,7 @@ class OrchestratorSessionTests(unittest.TestCase):
         from backend.database import SQLiteJournalRepository
         return SQLiteJournalRepository(":memory:")
 
-    def test_a_closed_market_skips_the_scan_and_is_not_an_error(self):
+    def test_a_closed_market_analyzes_completed_bars_but_never_executes(self):
         journal = self._journal()
         try:
             saturday = utc(2026, 10, 10, 15, 0)
@@ -431,22 +432,29 @@ class OrchestratorSessionTests(unittest.TestCase):
             result = orchestrator.run_once()
 
             self.assertTrue(result.session_skipped)
-            self.assertEqual(result.candidates, ())
             self.assertEqual(result.errors, (), "a closed market is not an error")
-            self.assertEqual(scanner.calls, 0,
-                             "no market data is fetched outside the session")
-            self.assertEqual(len(paper.trades), 0)
+            self.assertGreater(scanner.calls, 0,
+                               "completed bars are still analyzed outside the session")
+            self.assertEqual(result.approved_trades, ())
+            self.assertEqual(len(paper.trades), 0,
+                             "no entry is submitted while entries are blocked")
             self.assertEqual(paper.pipeline.orders.list(), ())
+            # Every setup the scan found is refused at the session gate with
+            # the calendar's reason - a decision, not an error.
+            refused = [d for d in result.decisions
+                       if d.stage == SESSION and d.outcome == REJECTED]
+            self.assertEqual([d.symbol for d in refused], ["AAA"])
+            self.assertIn("closed", " ".join(refused[0].reasons).lower())
 
             state = orchestrator.state
             self.assertTrue(state.session_blocked)
             self.assertIn("closed", (state.session_reason or "").lower())
-            self.assertEqual(state.candidates_found, 0)
+            self.assertGreater(state.candidates_found, 0)
             self.assertEqual(state.errors, ())
             self.assertIsNotNone(state.last_scan_timestamp,
-                                 "the cycle clock still advances while skipped")
+                                 "the cycle clock still advances while blocked")
             events = [event["event_type"] for event in journal.events()]
-            self.assertIn("CYCLE_SESSION_SKIPPED", events)
+            self.assertIn("CYCLE_SESSION_RESTRICTED", events)
             self.assertIn("CYCLE_COMPLETED", events)
         finally:
             journal.close()
@@ -486,16 +494,21 @@ class OrchestratorSessionTests(unittest.TestCase):
             provider_extended_hours=lambda: False)
         result = unsupported.run_once()
         self.assertTrue(result.session_skipped)
-        self.assertEqual(scanner.calls, 0)
+        self.assertGreater(scanner.calls, 0,
+                           "the scan itself is session-independent")
+        self.assertEqual(len(paper.trades), 0,
+                         "an incapable provider never receives an entry")
         self.assertIn("does not support extended-hours",
                       unsupported.state.session_reason or "")
 
         regular, scanner, paper, _ = self._orchestrator(
             lambda: pre_market, session_submission="regular",
             provider_extended_hours=lambda: True)
-        self.assertTrue(regular.run_once().session_skipped,
-                        "the regular policy never scans pre-market")
-        self.assertEqual(scanner.calls, 0)
+        result = regular.run_once()
+        self.assertTrue(result.session_skipped,
+                        "the regular policy never submits pre-market")
+        self.assertGreater(scanner.calls, 0)
+        self.assertEqual(len(paper.trades), 0)
 
     def test_a_failing_capability_caller_never_widens_the_session(self):
         pre_market = utc(2026, 10, 8, 12, 0)
@@ -507,7 +520,8 @@ class OrchestratorSessionTests(unittest.TestCase):
             lambda: pre_market, session_submission="extended",
             provider_extended_hours=explode)
         self.assertTrue(orchestrator.run_once().session_skipped)
-        self.assertEqual(scanner.calls, 0)
+        self.assertGreater(scanner.calls, 0,
+                           "a capability failure blocks submissions, not analysis")
 
 
 if __name__ == "__main__":

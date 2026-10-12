@@ -1,6 +1,6 @@
 """Provider-agnostic bridge between a configured market-data provider and consumers.
 
-The bridge knows nothing about portfolios, brokers, order flow, or TradingView.
+The bridge knows nothing about portfolios, brokers, order flow, or signals.
 It fetches real quotes, ages them against a *configured* staleness window, and
 reports one of five honest availability states. It never invents, interpolates,
 back-fills, or reuses a signal price as a market price: a symbol without a real
